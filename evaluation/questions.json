@@ -1,0 +1,7 @@
+[
+  {"id": "methods", "question": "当前资料使用了哪些研究方法？", "expected_no_evidence": false},
+  {"id": "datasets", "question": "当前资料涉及哪些数据集或基准？", "expected_no_evidence": false},
+  {"id": "findings", "question": "当前资料报告了哪些主要结论？", "expected_no_evidence": false},
+  {"id": "limitations", "question": "当前资料说明了哪些局限性？", "expected_no_evidence": false},
+  {"id": "reject", "question": "__researchwiki_out_of_scope_quantum_volcano_7391__", "expected_no_evidence": true}
+]

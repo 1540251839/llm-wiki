@@ -1,0 +1,32 @@
+llm:
+  provider: deepseek
+  model: deepseek-flash
+  base_url: https://api.deepseek.com
+  timeout_seconds: 180
+  max_retries: 1
+
+wiki:
+  root: ./wiki
+
+database:
+  path: ./data/researchwiki.db
+
+retrieval:
+  top_k: 8
+  max_context_chars: 48000
+  response_reserve_chars: 6000
+  max_page_chars: 9000
+  graph_expansion: true
+  vector:
+    enabled: false
+    provider: openai
+    model: text-embedding-3-small
+    base_url: https://api.openai.com/v1
+    timeout_seconds: 60
+
+ingestion:
+  quality_mode: standard
+  max_attempts: 3
+
+parser:
+  backend: pymupdf

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>ResearchWiki · 可追溯研究知识库</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236ea8ff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='sans-serif' font-size='22' font-weight='700' fill='white'%3ERW%3C/text%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">RW</div>
+          <div><strong>ResearchWiki</strong><span>Traceable knowledge</span></div>
+        </div>
+        <nav aria-label="主导航">
+          <button class="nav-item active" data-view="dashboard" data-short="总览"><span>01</span>知识工作台</button>
+          <button class="nav-item" data-view="documents" data-short="资料"><span>02</span>资料中心</button>
+          <button class="nav-item" data-view="wiki" data-short="Wiki"><span>03</span>Wiki 页面</button>
+          <button class="nav-item" data-view="graph" data-short="图谱"><span>04</span>知识图谱</button>
+          <button class="nav-item" data-view="ask" data-short="问答"><span>05</span>证据问答</button>
+          <button class="nav-item" data-view="evaluation" data-short="评估"><span>06</span>质量评估</button>
+          <button class="nav-item" data-view="reviews" data-short="审核"><span>07</span>Review 队列</button>
+          <button class="nav-item" data-view="settings" data-short="设置"><span>08</span>系统设置</button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="system-dot" id="api-dot"></div>
+          <div><span id="api-status">正在连接 API</span><small id="version-label">local</small></div>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="view-eyebrow">OVERVIEW</p>
+            <h1 id="view-title">知识工作台</h1>
+          </div>
+          <div class="top-actions">
+            <div class="model-chip" id="model-chip">模型状态读取中</div>
+            <button class="primary" id="header-upload">＋ 导入资料</button>
+          </div>
+        </header>
+
+        <section class="view active" id="view-dashboard">
+          <div class="hero panel">
+            <div>
+              <p class="eyebrow">LOCAL-FIRST · SOURCE-AWARE</p>
+              <h2>把论文变成可搜索、可互链、可回查的知识层。</h2>
+              <p>原文和 SQLite 索引保留在本地；DeepSeek 只负责结构化抽取与有证据的答案生成。</p>
+            </div>
+            <div class="hero-status"><span id="hero-provider">DEEPSEEK</span><strong id="hero-model">—</strong><small>服务端配置</small></div>
+          </div>
+
+          <div class="metric-grid" id="metric-grid"></div>
+
+          <div class="dashboard-grid">
+            <article class="panel flow-panel">
+              <div class="section-head"><div><p class="eyebrow">PIPELINE</p><h3>现有数据流</h3></div><span class="truth-label">真实执行链</span></div>
+              <div class="flow" id="dataflow"></div>
+            </article>
+            <article class="panel quality-panel">
+              <div class="section-head"><div><p class="eyebrow">QUALITY</p><h3>数据质量</h3></div></div>
+              <div id="quality-summary" class="quality-summary"></div>
+            </article>
+          </div>
+
+          <article class="panel">
+            <div class="section-head"><div><p class="eyebrow">RECENT</p><h3>最近资料</h3></div><button class="text-button" data-jump="documents">查看全部 →</button></div>
+            <div id="recent-documents" class="compact-list"></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-documents">
+          <div class="toolbar panel">
+            <label class="search-field"><span>⌕</span><input id="document-search" type="search" placeholder="搜索标题、作者或文件名" /></label>
+            <select id="status-filter" aria-label="处理状态">
+              <option value="">全部状态</option>
+              <option value="INDEXED">已索引</option>
+              <option value="UPLOADED">已上传</option>
+              <option value="EXTRACTING">抽取中</option>
+              <option value="EXTRACTED">已抽取</option>
+              <option value="WIKI_CREATED">编译中</option>
+              <option value="FAILED">失败</option>
+            </select>
+            <button class="primary" id="documents-upload">＋ 导入资料</button>
+          </div>
+          <article class="panel table-panel">
+            <div class="section-head"><div><p class="eyebrow">DOCUMENTS</p><h3>资料处理状态</h3></div><span id="document-count" class="truth-label">—</span></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>资料</th><th>处理状态</th><th>质量</th><th>作者 / 年份</th><th>更新时间</th><th></th></tr></thead>
+                <tbody id="documents-body"></tbody>
+              </table>
+            </div>
+            <div id="documents-empty" class="empty-state hidden">没有符合条件的资料。</div>
+          </article>
+        </section>
+
+        <section class="view" id="view-wiki">
+          <div class="split-layout">
+            <article class="panel list-pane">
+              <div class="section-head"><div><p class="eyebrow">COMPILED WIKI</p><h3>主题页面</h3></div><span id="wiki-count" class="truth-label">—</span></div>
+              <label class="search-field"><span>⌕</span><input id="wiki-search" type="search" placeholder="搜索 Wiki 标题" /></label>
+              <div id="wiki-list" class="wiki-list"></div>
+            </article>
+            <article class="panel detail-pane" id="wiki-detail">
+              <div class="empty-state">选择一个页面查看 Markdown 原文。</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-ask">
+          <div class="ask-layout">
+            <article class="panel ask-intro">
+              <p class="eyebrow">EVIDENCE FIRST</p>
+              <h2>只基于当前 Wiki 回答</h2>
+              <p>先融合 FTS5、可选向量与页面关系，再按全局上下文预算交给 DeepSeek。模型不可用时会明确切换为本地证据摘录。</p>
+              <div class="notice">没有检索证据时不会调用模型，也不会补写答案。</div>
+            </article>
+            <article class="panel ask-console">
+              <form id="ask-form">
+                <textarea id="ask-input" rows="4" minlength="2" maxlength="4000" placeholder="例如：这些论文如何处理标签噪声？" required></textarea>
+                <div class="ask-actions"><span id="ask-mode">等待提问</span><button class="primary" id="ask-submit" type="submit">检索并回答</button></div>
+              </form>
+              <div id="ask-result" class="answer empty-state">答案和来源会显示在这里。</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-graph">
+          <div class="graph-toolbar panel">
+            <label class="search-field"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索节点" /></label>
+            <div id="graph-type-filters" class="graph-filters"></div>
+            <button class="secondary" id="graph-zoom-out">－</button>
+            <button class="secondary" id="graph-reset">复位</button>
+            <button class="secondary" id="graph-zoom-in">＋</button>
+            <button class="primary" id="graph-extract">重新抽取</button>
+          </div>
+          <div class="graph-stats" id="graph-stats"></div>
+          <div class="graph-layout">
+            <article class="panel graph-panel"><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="知识图谱画布"></svg></article>
+            <aside class="panel graph-detail" id="graph-detail"><div class="empty-state">选择节点查看字段、证据与连接。</div></aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-evaluation">
+          <div class="toolbar panel evaluation-toolbar">
+            <div><p class="eyebrow">REPLAYABLE QA</p><h3>固定题库与可重放指标</h3></div>
+            <div class="top-actions"><button class="secondary" id="run-baseline">运行 baseline</button><button class="primary" id="run-optimized">运行 optimized</button></div>
+          </div>
+          <div class="metric-grid" id="evaluation-metrics"></div>
+          <article class="panel table-panel">
+            <div class="section-head"><div><p class="eyebrow">LATEST RUN</p><h3>逐题结果</h3></div><span class="truth-label" id="evaluation-run-label">尚未运行</span></div>
+            <div id="evaluation-cases" class="evaluation-cases"><div class="empty-state">运行固定题库后显示检索、引用和拒答结果。</div></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-reviews">
+          <article class="panel table-panel">
+            <div class="section-head">
+              <div><p class="eyebrow">HUMAN IN THE LOOP</p><h3>待审核问题</h3></div>
+              <div class="top-actions"><span id="review-count" class="truth-label">—</span><button class="secondary" id="refresh-reviews">刷新</button></div>
+            </div>
+            <div id="review-list" class="review-list"></div>
+          </article>
+        </section>
+
+        <section class="view" id="view-settings">
+          <div class="settings-grid">
+            <article class="panel table-panel"><p class="eyebrow">MODEL</p><h3>DeepSeek 连接</h3><div id="settings-model" class="settings-list"></div><button class="primary" id="test-model">执行最小连接测试</button><p id="test-model-result" class="form-message"></p></article>
+            <article class="panel table-panel"><p class="eyebrow">RETRIEVAL</p><h3>检索运行条件</h3><div id="settings-retrieval" class="settings-list"></div></article>
+            <article class="panel table-panel"><p class="eyebrow">BOUNDARY</p><h3>安全边界</h3><div class="notice">密钥只由服务端读取，不会返回浏览器。连接测试会真实调用当前模型，并可能产生少量 API 费用。</div></article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="upload-dialog">
+      <form method="dialog" class="dialog-card" id="upload-form">
+        <div class="section-head"><div><p class="eyebrow">NEW SOURCE</p><h3>导入研究资料</h3></div><button class="icon-button" id="upload-close" type="button" aria-label="关闭">×</button></div>
+        <label class="drop-zone" id="drop-zone">
+          <input id="file-input" name="file" type="file" accept=".pdf,.txt,.md,.markdown" required />
+          <strong>选择 PDF、TXT 或 Markdown</strong>
+          <span>文件先保存在本地，再进入 DeepSeek 抽取；最大 50 MiB。</span>
+        </label>
+        <div class="privacy-note">论文正文会发送至当前配置的 DeepSeek API。密钥只保存在服务端，不会下发到浏览器。</div>
+        <label class="mode-field">处理模式
+          <select id="quality-mode" name="quality_mode">
+            <option value="standard">标准：一次结构化抽取</option>
+            <option value="high">高质量：先分析，再生成</option>
+          </select>
+          <small>高质量模式通常会多调用一次模型。</small>
+        </label>
+        <div class="dialog-actions"><button class="secondary" id="upload-cancel" type="button">取消</button><button class="primary" id="upload-submit" type="submit">上传并处理</button></div>
+        <p id="upload-message" class="form-message"></p>
+      </form>
+    </dialog>
+
+    <dialog id="document-dialog">
+      <article class="dialog-card detail-dialog">
+        <div class="section-head"><div><p class="eyebrow">DOCUMENT DETAIL</p><h3 id="detail-title">资料详情</h3></div><button class="icon-button" id="detail-close" aria-label="关闭">×</button></div>
+        <div id="document-detail"></div>
+      </article>
+    </dialog>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
