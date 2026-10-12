@@ -24,6 +24,7 @@ def test_wiki_page_types_have_distinct_content(tmp_path):
         datasets=[EntityMention("DemoSet", "Retrieval benchmark.", "Legal retrieval", "100 queries.")],
         topics=["Legal retrieval"], findings=["Improved score by 10%."],
     )
+    (tmp_path / "data" / "extractions").mkdir(parents=True, exist_ok=True)
     (tmp_path / "data" / "extractions" / (digest + ".json")).write_text(json.dumps(paper.to_dict()))
     db = Database(config.db_path)
     try:
