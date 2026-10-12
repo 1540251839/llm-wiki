@@ -36,3 +36,92 @@ def test_basic_ingest_needs_no_model_key(tmp_path):
         assert job_pages
     finally:
         db.close()
+
+
+
+def test_deep_failure_preserves_previously_indexed_basic_wiki(tmp_path):
+    import json
+    import pytest
+
+    class BrokenModel:
+        enabled = True
+
+        def structured(self, *_args, **_kwargs):
+            raise RuntimeError("model unavailable")
+
+    config = load_config(tmp_path)
+    source = tmp_path / "study.txt"
+    source.write_text(
+        "A Reliable Method for Legal Retrieval\n"
+        "Abstract: This paper discusses legal retrieval and uncertain evidence "
+        "over multiple cases and explicitly mentions LeCaRD.\n"
+        "Keywords: retrieval, evidence\n"
+        "1. Introduction\n"
+        "We mention LeCaRD and discuss relevance.",
+        encoding="utf-8",
+    )
+    result = ingest(config, source, quality_mode="basic")
+    original_wiki = __import__("pathlib").Path(result["paper_path"]).read_bytes()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    cache = tmp_path / "data" / "extractions" / (digest + ".json")
+    original_cache = cache.read_bytes()
+
+    with pytest.raises(RuntimeError, match="Deep paper extraction failed"):
+        ingest(config, source, quality_mode="standard", llm_client=BrokenModel(), resume=True)
+    assert cache.read_bytes() == original_cache
+    assert __import__("pathlib").Path(result["paper_path"]).read_bytes() == original_wiki
+    db = Database(config.db_path)
+    try:
+        assert db.get_paper(digest)["status"] == "INDEXED"
+    finally:
+        db.close()
+    assert json.loads(cache.read_text())["extraction_mode"] == "basic"
+
+
+def test_opt_in_cross_paper_summary_is_cited_and_cached(tmp_path):
+    import json
+    from researchwiki.compilation import CompilationService
+    from researchwiki.extraction.synthesis import synthesize_topic
+
+    class StubModel:
+        enabled = True
+
+        def structured(self, system, user):
+            if "source_ids" in system:
+                context = json.loads(user.split("\n\n", 1)[1])
+                return {
+                    "claims": [{"text": "Both papers investigate retrieval robustness.",
+                                "source_ids": [p["source_id"] for p in context]}],
+                    "open_questions": [],
+                }
+            return {
+                "methods": [{"name": "Evidence Robustness", "description": "Studies relevance errors."}],
+                "datasets": [{"name": "LeCaRD", "role": "Reported evaluation"}],
+                "topics": ["Retrieval Robustness"],
+                "research_problem": "How to remain robust to noise?",
+                "experiment_info": "LeCaRD was used for retrieval evaluation.",
+            }
+
+    config = load_config(tmp_path)
+    for i in (1, 2):
+        source = tmp_path / ("paper" + str(i) + ".txt")
+        source.write_text(
+            f"A Study of Retrieval Robustness {i}\n"
+            "Abstract: This paper investigates legal retrieval robustness "
+            "through new evidence modeling on noisy data.\n"
+            "Keywords: legal retrieval, noise\n"
+            "1. Introduction\n"
+            "This work uses the LeCaRD dataset.",
+            encoding="utf-8",
+        )
+        assert ingest(config, source, quality_mode="standard", llm_client=StubModel())["status"] == "indexed"
+    summary = synthesize_topic(config, "Retrieval Robustness", llm=StubModel())
+    assert summary["review_status"] == "needs_review"
+    assert len(summary["source_ids"]) == 2
+    result = CompilationService(config).run()
+    assert result["status"] == "succeeded", result
+    topic_page = next(page for page in CompilationService(config).manifest()["pages"]
+                      if page["type"] == "topic" and page["title"] == "Retrieval Robustness")
+    text = (tmp_path / topic_page["path"]).read_text()
+    assert "## 深度跨论文综合（待人工复核）" in text
+    assert "Both papers investigate retrieval robustness. [1] [2]" in text
