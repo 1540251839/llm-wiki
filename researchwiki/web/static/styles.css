@@ -656,3 +656,19 @@ dialog::backdrop { background: #14232c77; backdrop-filter: blur(3px); }
 .wiki-type-tab:hover { border-color: var(--blue); color: var(--text); }
 .wiki-type-tab.active { background: var(--accent-soft); color: var(--blue); border-color: var(--blue); font-weight: 650; }
 .wiki-type-tab:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* ResearchWiki P0: reading-oriented layout and local model settings */
+.wiki-guide { font-size: 11px; line-height: 1.75; color: var(--muted); margin: 0 0 14px; }
+.settings-form { display: grid; gap: 11px; margin-top: 20px; }
+.settings-form label { font-weight: 600; font-size: 13px; }
+.settings-form input { width: 100%; min-height: 42px; }
+.settings-form small { color: var(--muted); font-size: 11px; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.settings-actions button { flex: 0 0 auto; }
+.advanced-details { margin-top: 24px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; }
+.advanced-details summary { font-weight: 600; cursor: pointer; }
+@media (max-width: 760px) {
+  .settings-actions button { flex: 1 1 125px; }
+  .wiki-type-tabs { gap: 3px; }
+  .wiki-type-tab { font-size: 10px; padding: 8px 1px; }
+}
