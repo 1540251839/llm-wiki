@@ -283,32 +283,34 @@ class CompilationService:
             source = contributors[0][0]
             paper = source.paper
             front.update(source=source.raw_path, source_hash=source.source_id, authors=paper.authors, year=paper.year)
-            lines = [f"# {paper.title}", "", "## 基本信息", "", f"作者：{', '.join(paper.authors) or '未提供'}", f"年份：{paper.year or '未提供'}", ""]
-            for heading, text in (("摘要", paper.abstract), ("研究问题", paper.research_problem), ("核心方法", paper.methodology)):
-                lines.extend(["## " + heading, "", (str(text).strip() + " [1]") if text else "来源抽取未提供；不能据此推断结论。", ""])
-            for heading, values in (("主要贡献", paper.contributions), ("评价指标", paper.metrics), ("主要实验结论", paper.findings), ("局限性", paper.limitations)):
-                lines.extend(["## " + heading, "", *(["- " + value + " [1]" for value in values] or ["- 未抽取到明确证据。"]), ""])
-            for heading, kind, values in (("方法", "method", paper.methods), ("数据集", "dataset", paper.datasets), ("相关研究主题", "topic", paper.topics)):
+            lines = [f"# {paper.title}", "", "## 基本信息", "", f"作者：{', '.join(paper.authors) or '未提供'}", f"年份：{paper.year or '未提供'}", "", "## 摘要", "", (paper.abstract.strip() + " [1]") if paper.abstract else "原文未提取到摘要。", "", "## 关键词", ""]
+            lines.extend(["- " + keyword for keyword in paper.keywords] or ["- 原文未提取到作者关键词。"])
+            for heading, kind, values in (("数据集", "dataset", paper.datasets), ("相关方法", "method", paper.methods), ("相关研究主题", "topic", paper.topics)):
                 names = [value if isinstance(value, str) else value.name for value in values]
                 names = [title_by_id.get(kind + ":" + hashlib.sha256(normalize_name(name).encode("utf-8")).hexdigest()[:16], name) for name in names if name.strip()]
-                lines.extend(["## " + heading, "", *(["- [[" + name + "]]" for name in dict.fromkeys(names)] or ["- 未识别。"]), ""])
+                lines.extend(["", "## " + heading, "", *(["- [[" + name + "]]" for name in dict.fromkeys(names)] or ["- 未识别。"])])
+            lines.extend(["", "## 实验信息", "", paper.experiment_info.strip() + " [1]" if paper.experiment_info.strip() else "原文未提取到明确实验设置。"])
+            if paper.metrics:
+                lines.extend(["", "### 评价指标", "", *["- " + x + " [1]" for x in paper.metrics]])
+            lines.extend(["", "## 原文来源", "", "原始文件：`" + source.raw_path + "`", "SHA-256：`" + source.source_id + "`", ""])
         else:
-            heading = {"method": "方法在不同研究中的用途", "dataset": "数据集在不同研究中的用途", "topic": "研究问题与跨来源比较"}[spec["type"]]
-            lines = ["# " + spec["title"], "", "## 稳定问题", "", f"{spec['title']} 在这些论文中如何定义、使用，其证据和适用边界是什么？", "", "## " + heading, ""]
+            kind = spec["type"]
+            lines = ["# " + spec["title"], ""]
+            if kind == "topic":
+                lines.extend(["## 概念简介", "", "由相关论文汇集的研究主题；尚未核实独立定义。", "", "## 研究方向分类", "", "尚未形成有证据支持的子方向分类。", "", "## 相关论文", ""])
+            elif kind == "method":
+                definitions = [(i, d) for i, (_, d, _) in enumerate(contributors, 1) if d.strip()]
+                principles = [(i, p) for i, (source, _, _) in enumerate(contributors, 1) for method in source.paper.methods if normalize_name(method.name) == normalize_name(spec["title"]) for p in [method.principle] if p.strip()]
+                lines.extend(["## 方法定义", "", *([f"- {d} [{i}]" for i,d in definitions] or ["来源未提供明确的方法定义。"]), "", "## 基本原理", "", *([f"- {p} [{i}]" for i,p in principles] or ["来源未提供可核验的原理说明。"]), "", "## 所属论文与应用场景", ""])
+            else:
+                descriptions = [(i, d) for i, (_, d, _) in enumerate(contributors, 1) if d.strip()]
+                statistics = [(i, p) for i, (source, _, _) in enumerate(contributors, 1) for dataset in source.paper.datasets if normalize_name(dataset.name) == normalize_name(spec["title"]) for p in [dataset.statistics] if p.strip()]
+                lines.extend(["## 数据集简介", "", *([f"- {d} [{i}]" for i,d in descriptions] or ["来源未提供数据集简介。"]), "", "## 任务", "", *([f"- {role} [{i}]" for i,(_, _, role) in enumerate(contributors, 1) if role.strip()] or ["来源未提供明确的任务说明。"]), "", "## 统计信息", "", *([f"- {p} [{i}]" for i,p in statistics] or ["来源未提供可核验的统计信息。"]), "", "## 使用该数据集的论文", ""])
             for index, (source, description, role) in enumerate(contributors, 1):
-                paper = source.paper
-                lines.extend(["### [[" + paper.title + "]]", ""])
-                if description:
-                    lines.extend([description + f" [{index}]", ""])
-                if role:
-                    lines.extend(["用途：" + role + f" [{index}]", ""])
-                if not description and not role:
-                    lines.extend([(paper.research_problem or paper.abstract or "来源将该主题列为研究主题；未提供进一步定义。") + f" [{index}]", ""])
-                if paper.findings:
-                    lines.extend(["该论文的相关结论（需结合原文适用条件）：", "", *["- " + item + f" [{index}]" for item in paper.findings[:4]], ""])
-                if paper.limitations:
-                    lines.extend(["该来源的边界：", "", *["- " + item + f" [{index}]" for item in paper.limitations[:3]], ""])
-            lines.extend(["## 证据边界", "", "各来源的观点分别保留；共享术语不代表实验条件或结论一致。编号指向来源片段，抽取结果仍需对照原文复核。", ""])
+                lines.append("- [[" + source.paper.title + "]]")
+                if kind != "topic" and role.strip():
+                    lines.append("  - 用途：" + role + f" [{index}]")
+            lines.extend(["", "## 证据说明", "", "此页仅汇总各来源中相关的知识与出处，不重复整篇论文摘要或完整实验结论。来源摘录不等于对每条论断独立核验。", ""])
         lines.extend(["## 来源证据", ""])
         for index, ((source, _, _), span) in enumerate(zip(contributors, evidence), 1):
             label = "原文命中" if span["confidence"] == "exact_text" else "来源摘录（未定位到主题原词，不代表逐条论断已核验）"
