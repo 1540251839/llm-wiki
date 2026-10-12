@@ -6,6 +6,8 @@ import re
 
 from ..llm.client import LLMClient
 from ..models import ParsedDocument, StructuredPaper, EntityMention
+from .context import extraction_context
+from .evidence import verify_field_evidence
 from .prompts import (
     PAPER_ANALYSIS_SYSTEM,
     PAPER_EXTRACTION_SYSTEM,
@@ -28,7 +30,7 @@ def analyze_paper(document: ParsedDocument, llm: LLMClient, purpose: str = "", l
     try:
         return llm.generate(
             PAPER_ANALYSIS_SYSTEM + extraction_language_rules(language),
-            paper_analysis_prompt(document.text, purpose),
+            paper_analysis_prompt(extraction_context(document), purpose),
             temperature=0.1,
         )
     except Exception as exc:
@@ -47,7 +49,7 @@ def extract_paper(
     try:
         payload = llm.structured(
             PAPER_EXTRACTION_SYSTEM + extraction_language_rules(language),
-            paper_extraction_prompt(document.text, analysis=analysis, purpose=purpose),
+            paper_extraction_prompt(extraction_context(document), analysis=analysis, purpose=purpose),
         )
     except Exception as exc:
         raise RuntimeError("LLM paper extraction failed: " + str(exc)) from exc
@@ -126,5 +128,6 @@ def enrich_paper(
             # Prefer an explicit model-extracted experimental role over a base mention.
             datasets[key] = item
     baseline.datasets = list(datasets.values())
+    baseline.field_evidence = verify_field_evidence(document, payload.get("evidence"))
     baseline.extraction_mode = "high" if quality_mode == "high" else "deep"
     return baseline
