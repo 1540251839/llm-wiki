@@ -299,7 +299,7 @@ class Database:
         quality_mode: str = "standard",
         max_attempts: int = 3,
     ) -> Dict[str, Any]:
-        mode = quality_mode if quality_mode in {"standard", "high"} else "standard"
+        mode = quality_mode if quality_mode in {"basic", "standard", "high"} else "standard"
         active = self.conn.execute(
             """SELECT * FROM ingest_jobs
                WHERE source_id=? AND status IN ('PENDING','RUNNING','PAUSED')
@@ -403,7 +403,7 @@ class Database:
         max_attempts = int(row["max_attempts"] or 3)
         if attempts >= max_attempts:
             self.conn.execute("UPDATE ingest_jobs SET attempts=0 WHERE id=?", (job_id,))
-        mode = quality_mode if quality_mode in {"standard", "high"} else str(row["quality_mode"] or "standard")
+        mode = quality_mode if quality_mode in {"basic", "standard", "high"} else str(row["quality_mode"] or "standard")
         self.conn.execute(
             """UPDATE ingest_jobs SET status='PENDING',stage='QUEUED',error_message='',
                quality_mode=?,started_at=NULL,finished_at=NULL,updated_at=datetime('now') WHERE id=?""",
