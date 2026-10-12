@@ -7,6 +7,7 @@ llm:
 
 wiki:
   root: ./wiki
+  language: zh-CN  # 中文解释优先；英文标题、摘要及证据始终保留
 
 database:
   path: ./data/researchwiki.db
