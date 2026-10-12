@@ -279,13 +279,25 @@ async function openDocument(id) {
   }
 }
 
+const wikiTypeLabels = {paper: "论文", topic: "主题", method: "方法", dataset: "数据集"};
+
+function setWikiType(type) {
+  $("#wiki-type-filter").value = type;
+  $(".wiki-type-tab").forEach((button) => {
+    const selected = button.dataset.wikiType === type;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  loadWiki();
+}
+
 async function loadWiki() {
   const q = $("#wiki-search").value.trim();
   try {
     const value = await api(`/api/wiki/pages?q=${encodeURIComponent(q)}&type=${encodeURIComponent($("#wiki-type-filter").value)}&limit=500`);
     $("#wiki-count").textContent = value.items.length < value.total ? `${value.items.length} / ${value.total} 页` : `${value.total} 页`;
     const root = $("#wiki-list");
-    root.innerHTML = value.items.map((item) => `<button class="wiki-item" data-page-id="${item.id}" data-page-title="${escapeHTML(item.title)}">${escapeHTML(item.title)}<small>${escapeHTML(item.type)} · ${escapeHTML(item.path)}</small></button>`).join("") || `<div class="empty-state">没有页面。</div>`;
+    root.innerHTML = value.items.map((item) => `<button class="wiki-item" data-page-id="${item.id}" data-page-title="${escapeHTML(item.title)}">${escapeHTML(item.title)}<small>${escapeHTML(wikiTypeLabels[item.type] || item.type)} · ${escapeHTML(item.path)}</small></button>`).join("") || `<div class="empty-state">没有页面。</div>`;
     $$('[data-page-id]', root).forEach((button) => button.addEventListener("click", () => openWikiPage(button)));
   } catch (error) { toast(`Wiki 加载失败：${error.message}`); }
 }
@@ -293,7 +305,7 @@ async function loadWiki() {
 async function goToWikiPage(id, title = "") {
   $("#document-dialog")?.close();
   $("#wiki-search").value = title;
-  $("#wiki-type-filter").value = "";
+  setWikiType("");
   showView("wiki");
   await loadWiki();
   const button = $(`[data-page-id="${CSS.escape(String(id))}"]`, $("#wiki-list"));
@@ -373,7 +385,7 @@ async function openWikiPage(button) {
     const sourceCards = (page.sources || []).map((source, index) => { const citationIndex = Number(source.citation_index || index + 1); return `<article class="citation-card wiki-source-card" id="wiki-source-${citationIndex}" tabindex="-1"><span class="citation-number">${citationIndex}</span>${evidenceMarkup(source)}</article>`; }).join("");
     const relatedCards = (page.related || []).map((item) => `<button class="source-card" type="button" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}"><strong>${escapeHTML(item.title)}</strong><br>${escapeHTML(item.type)} · score ${Number(item.score || 0).toFixed(1)}</button>`).join("");
     const backlinks = (page.backlinks || []).map((item) => `<button class="inline-link" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}">↶ ${escapeHTML(item.title)}</button>`).join("");
-    root.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHTML(page.type)} · ${(page.sources || []).length} 个来源</p><h2>${escapeHTML(page.title)}</h2></div></div><div class="wiki-location">${escapeHTML(page.path)}</div><div class="prose wiki-prose">${renderMarkdown(page.content, true, "wiki")}</div><details class="raw-details"><summary>查看 Markdown 原文</summary><pre class="markdown">${escapeHTML(page.content)}</pre></details><div class="detail-section"><h3>来源证据</h3><div class="evidence-strip">${sourceCards || '<p class="muted">暂无可回查来源，此页需要审核。</p>'}</div></div><div class="detail-section"><h3>反向链接</h3><div class="backlink-list">${backlinks || '<p class="muted">暂无页面引用此主题。</p>'}</div></div>${relatedCards ? `<div class="detail-section"><h3>相关主题</h3><div class="source-list">${relatedCards}</div></div>` : ""}`;
+    root.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHTML(wikiTypeLabels[page.type] || page.type)} · ${(page.sources || []).length} 个来源</p><h2>${escapeHTML(page.title)}</h2></div></div><div class="wiki-location">${escapeHTML(page.path)}</div><div class="prose wiki-prose">${renderMarkdown(page.content, true, "wiki")}</div><details class="raw-details"><summary>查看 Markdown 原文</summary><pre class="markdown">${escapeHTML(page.content)}</pre></details><div class="detail-section"><h3>来源证据</h3><div class="evidence-strip">${sourceCards || '<p class="muted">暂无可回查来源，此页需要审核。</p>'}</div></div><div class="detail-section"><h3>反向链接</h3><div class="backlink-list">${backlinks || '<p class="muted">暂无页面引用此主题。</p>'}</div></div>${relatedCards ? `<div class="detail-section"><h3>相关主题</h3><div class="source-list">${relatedCards}</div></div>` : ""}`;
     bindWikiLinks(root);
     $$('[data-wiki-citation]', root).forEach((citation) => citation.addEventListener("click", () => { const card = $(`#wiki-source-${citation.dataset.wikiCitation}`, root); if (!card) return toast("该编号没有对应的来源证据"); $$(".wiki-source-card", root).forEach((item) => item.classList.remove("highlight")); card.classList.add("highlight"); card.scrollIntoView({ behavior: "smooth", block: "center" }); card.focus({ preventScroll: true }); }));
   } catch (error) { root.innerHTML = `<div class="empty-state">读取失败：${escapeHTML(error.message)}</div>`; }
@@ -825,7 +837,8 @@ function bindEvents() {
     window.clearTimeout(documentSearchTimer);
     documentSearchTimer = window.setTimeout(loadWiki, 250);
   });
-  $("#wiki-type-filter").addEventListener("change", loadWiki);
+  $(".wiki-type-tab").forEach((button) => button.addEventListener("click", () => setWikiType(button.dataset.wikiType)));
+  $("#wiki-type-filter").addEventListener("change", () => setWikiType($("#wiki-type-filter").value));
   $("#compile-build").addEventListener("click", buildKnowledge);
   $("#compilation-refresh").addEventListener("click", loadCompilation);
   $("#ask-form").addEventListener("submit", submitQuestion);
