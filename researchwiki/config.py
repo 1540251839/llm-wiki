@@ -31,7 +31,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "ingestion": {
-        "quality_mode": "standard",
+        "quality_mode": "basic",
         "max_attempts": 3,
     },
     "parser": {"backend": "pymupdf"},
@@ -65,8 +65,8 @@ class Config:
 
     @property
     def quality_mode(self) -> str:
-        value = str(self.ingestion.get("quality_mode", "standard")).strip().lower()
-        return value if value in {"standard", "high"} else "standard"
+        value = str(self.ingestion.get("quality_mode", "basic")).strip().lower()
+        return value if value in {"basic", "standard", "high"} else "basic"
 
     @property
     def max_ingest_attempts(self) -> int:
