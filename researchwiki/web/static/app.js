@@ -729,8 +729,8 @@ const graphColors = {
 const graphTypeNames = {PAPER:"论文", TOPIC:"主题", METHOD:"方法", DATASET:"数据集"};
 const graphRelationNames = {
   STUDIES_TOPIC: "研究主题", REFERENCES_METHOD: "涉及方法",
-  MENTIONS_DATASET: "提及数据集", TESTED_ON: "用于测试",
-  TRAINED_ON: "用于训练", VALIDATED_ON: "用于验证", RELATED: "相关"
+  MENTIONS_DATASET: "提及数据集", TESTED_ON: "测试关联（待核对）",
+  TRAINED_ON: "训练关联（待核对）", VALIDATED_ON: "验证关联（待核对）", RELATED: "相关"
 };
 
 function graphTransform() {
@@ -874,7 +874,7 @@ async function enableG6ResearchGraph() {
     try {
       await new Promise((resolve,reject)=>{
         const tag=document.createElement("script");
-        tag.src="https://cdn.jsdelivr.net/npm/@antv/g6@5/dist/g6.min.js";
+        tag.src="https://cdn.jsdelivr.net/npm/@antv/g6@5.1.1/dist/g6.min.js";
         tag.async=true;tag.onload=resolve;tag.onerror=reject;
         document.head.appendChild(tag);
       });
