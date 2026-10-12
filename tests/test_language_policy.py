@@ -51,6 +51,7 @@ def test_bilingual_wiki_keeps_stable_original_names_and_searches_chinese(tmp_pat
         topic_labels_zh={"Evidential learning": "证据学习"},
         source_hash=digest, source_path=str(source_path),
     )
+    (tmp_path / "data" / "extractions").mkdir(parents=True, exist_ok=True)
     (tmp_path / "data" / "extractions" / (digest + ".json")).write_text(
         json.dumps(paper.to_dict(), ensure_ascii=False), encoding="utf-8"
     )
@@ -102,6 +103,7 @@ def test_basic_cache_does_not_invent_a_chinese_translation(tmp_path):
     source.write_text(original, encoding="utf-8")
     paper = StructuredPaper(title="Offline Study", abstract="An original English abstract without a translation.",
                             source_hash=digest)
+    (tmp_path / "data" / "extractions").mkdir(parents=True, exist_ok=True)
     (tmp_path / "data" / "extractions" / (digest + ".json")).write_text(
         json.dumps(paper.to_dict()), encoding="utf-8"
     )
