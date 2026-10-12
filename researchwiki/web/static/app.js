@@ -238,10 +238,19 @@ async function openDocument(id) {
       ${reviews.length ? `<div class="detail-section"><h3>待审核</h3><div class="review-list">${reviews.map((review) => `<div class="review-item"><div><span class="badge ${review.severity === "error" ? "error" : "warning"}">${escapeHTML(review.kind)}</span><p>${escapeHTML(review.message)}</p></div><button class="row-action" data-resolve-review="${review.id}">标为已处理</button></div>`).join("")}</div></div>` : ""}
       <div class="dialog-actions">
         ${item.raw_name ? `<a class="secondary" target="_blank" rel="noopener" href="/api/documents/${encodeURIComponent(item.id)}/file">查看原始资料 ↗</a>` : ""}
+        ${item.status === "INDEXED" && job.quality_mode === "basic" ? '<button class="primary" id="enrich-document">使用模型深度分析</button>' : ""}
         <button class="danger" id="delete-document">移到回收区</button>
         ${item.retryable ? `<button class="secondary" id="retry-document-high">高质量重试</button><button class="primary" id="retry-document">标准重试</button>` : ""}
       </div>`;
     $$('[data-related-page]', root).forEach((button) => button.addEventListener("click", () => goToWikiPage(button.dataset.relatedPage, button.dataset.relatedTitle)));
+    $("#enrich-document")?.addEventListener("click", async () => {
+      try {
+        await api(`/api/documents/${encodeURIComponent(id)}/enrich?quality_mode=standard`, { method: "POST" });
+        toast("已加入深度分析队列");
+        dialog.close();
+        startPolling(id);
+      } catch (error) { toast(error.message); }
+    });
     $("#retry-document")?.addEventListener("click", async () => {
       try {
         await api(`/api/documents/${encodeURIComponent(id)}/retry?quality_mode=standard`, { method: "POST" });
