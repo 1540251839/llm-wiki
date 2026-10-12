@@ -271,6 +271,35 @@ class CompilationService:
             spec["path"] = path
             reserved.add(path)
 
+    def _display_title(self, spec: Dict[str, Any]) -> str:
+        """Chinese display alias, original stable entity name remains unchanged."""
+        name = spec["title"]
+        if self.config.wiki_language != "zh-CN" or spec["type"] == "paper":
+            return name
+        aliases: List[str] = []
+        for source, _description, _role in spec["contributors"]:
+            paper = source.paper
+            if spec["type"] == "topic":
+                aliases.extend(
+                    str(alias).strip() for original, alias in paper.topic_labels_zh.items()
+                    if normalize_name(original) == normalize_name(name) and str(alias).strip()
+                )
+            elif spec["type"] in {"method", "dataset"}:
+                entities = paper.methods if spec["type"] == "method" else paper.datasets
+                aliases.extend(
+                    item.name_zh.strip() for item in entities
+                    if normalize_name(item.name) == normalize_name(name) and item.name_zh.strip()
+                )
+        # A translated label is for reading only; it must never alter IDs or links.
+        aliases = [alias for alias in aliases if re.search(r"[\u3400-\u9fff]", alias)]
+        if not aliases:
+            return name
+        counts = Counter(aliases)
+        preferred = sorted(counts, key=lambda item: (-counts[item], item))[0]
+        if normalize_name(preferred) == normalize_name(name):
+            return name
+        return f"{preferred}（{name}）"
+
     def _render(self, spec: Dict[str, Any], title_by_id: Dict[str, str]) -> Tuple[str, List[Dict[str, Any]]]:
         contributors = spec["contributors"]
         evidence = []
@@ -278,13 +307,28 @@ class CompilationService:
             terms = [spec["title"], description]
             evidence.append(self._evidence(source, terms))
         source_ids = [source.source_id for source, _, _ in contributors]
-        front = {"id": spec["id"], "type": spec["type"], "title": spec["title"], "sources": source_ids,
-                 "generated_by": COMPILER, "schema_version": SCHEMA_VERSION}
+        display_title = self._display_title(spec)
+        front = {"id": spec["id"], "type": spec["type"], "title": spec["title"], "display_title": display_title,
+                 "sources": source_ids, "generated_by": COMPILER, "schema_version": SCHEMA_VERSION}
         if spec["type"] == "paper":
             source = contributors[0][0]
             paper = source.paper
             front.update(source=source.raw_path, source_hash=source.source_id, authors=paper.authors, year=paper.year)
-            lines = [f"# {paper.title}", "", "## 基本信息", "", f"作者：{', '.join(paper.authors) or '未提供'}", f"年份：{paper.year or '未提供'}", "", "## 摘要", "", (paper.abstract.strip() + " [1]") if paper.abstract else "原文未提取到摘要。", "", "## 关键词", ""]
+            lines = [
+                f"# {paper.title}", "", "## 基本信息", "",
+                f"作者：{', '.join(paper.authors) or '未提供'}",
+                f"年份：{paper.year or '未提供'}", "",
+            ]
+            if self.config.wiki_language == "zh-CN":
+                lines.extend(["## 中文摘要", "",
+                    (paper.abstract_zh.strip() + " [1]\n\n*中文内容由模型生成，需对照原文核实。*")
+                    if paper.abstract_zh.strip()
+                    else "暂无中文摘要。基础模式不调用翻译模型；保留以下原文摘要。", ""])
+            lines.extend([
+                "## 原文摘要（Abstract）", "",
+                (paper.abstract.strip() + " [1]") if paper.abstract else "原文未提取到摘要。",
+                "", "## 关键词（原文）", "",
+            ])
             lines.extend(["- " + keyword for keyword in paper.keywords] or ["- 原文未提取到作者关键词。"])
             for heading, kind, values in (("数据集", "dataset", paper.datasets), ("相关方法", "method", paper.methods), ("相关研究主题", "topic", paper.topics)):
                 names = [value if isinstance(value, str) else value.name for value in values]
@@ -296,7 +340,7 @@ class CompilationService:
             lines.extend(["", "## 原文来源", "", "原始文件：`" + source.raw_path + "`", "SHA-256：`" + source.source_id + "`", ""])
         else:
             kind = spec["type"]
-            lines = ["# " + spec["title"], ""]
+            lines = ["# " + display_title, ""]
             if kind == "topic":
                 lines.extend(["## 概念简介", "", "由相关论文汇集的研究主题；尚未核实独立定义。", "", "## 研究方向分类", "", "尚未形成有证据支持的子方向分类。", "", "## 相关论文", ""])
             elif kind == "method":
@@ -360,7 +404,8 @@ class CompilationService:
             old = path.read_text(encoding="utf-8") if path.exists() else None
             changes["created" if old is None else "unchanged" if old == content else "updated"].append(relative)
             planned[path] = content
-            pages.append({"id": spec["id"], "title": spec["title"], "type": spec["type"], "path": relative,
+            pages.append({"id": spec["id"], "title": spec["title"], "display_title": self._display_title(spec),
+                          "type": spec["type"], "path": relative,
                           "sources": [item[0].source_id for item in spec["contributors"]], "links": wiki_links(generated),
                           "generated_sha256": _digest(self.wiki._generated_part(content)), "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(), "evidence": evidence})
             descriptions = {description.strip() for _, description, _ in spec["contributors"] if description.strip()}
@@ -410,7 +455,7 @@ class CompilationService:
             for page in manifest["pages"]:
                 if page["type"] == kind:
                     relative = (self.config.root / page["path"]).relative_to(self.config.wiki_root).as_posix()
-                    lines.append(f"- [{page['title']}]({relative}) · {len(page['sources'])} 个来源")
+                    lines.append(f"- [{page.get('display_title') or page['title']}]({relative}) · {len(page['sources'])} 个来源")
             lines.append("")
         return "\n".join(lines)
 
