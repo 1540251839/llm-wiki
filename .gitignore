@@ -10,6 +10,10 @@ build/
 data/*.db
 data/*.db-*
 data/inbox/
+data/backups/
+data/acceptance/
+data/compilation/
+data/evaluation/
 logs/*.log
 
 # Local secrets

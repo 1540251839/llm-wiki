@@ -17,7 +17,8 @@ from .index.database import Database
 from .llm.client import LLMClient
 from .models import StructuredPaper
 from .parsing.pdf import parse_file
-from .qa.engine import answer, answer_with_metadata
+from .qa.engine import answer, answer_with_metadata, answer_events
+from .qa.retrieval import retrieve_evidence
 from .retrieval.search import search
 from .retrieval.vector import sync_vector_index
 from .wiki.manager import WikiManager
@@ -195,6 +196,7 @@ def _refresh_evidence_locators(
     current_pages: Optional[List[Any]] = None,
 ) -> int:
     updated = 0
+    parsed_sources = {}
     for record in db.list_papers(page=1, page_size=10000)["items"]:
         source_id = str(record.get("id") or "")
         if not source_id:
@@ -210,6 +212,35 @@ def _refresh_evidence_locators(
             except Exception:
                 continue
         updated += db.enrich_source_evidence(source_id, pages)
+        parsed_sources[source_id] = {page.number: page.text for page in pages}
+    # A compiler manifest holds the precise spans shown in compiled Markdown.
+    # Re-validate against the parsed source before using them in QA/graph so all
+    # consumers see the same evidence rather than independently guessed snippets.
+    manifest_path = config.wiki_root / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for item in manifest.get("pages", []):
+                page_path = (config.root / str(item.get("path") or "")).resolve()
+                if not page_path.is_relative_to(config.wiki_root.resolve()):
+                    continue
+                row = db.conn.execute("SELECT id FROM wiki_pages WHERE path=?", (str(page_path),)).fetchone()
+                if not row:
+                    continue
+                for span in item.get("evidence", []):
+                    source_id = str(span.get("source_id") or "")
+                    text = parsed_sources.get(source_id, {}).get(int(span.get("page_number") or 0), "")
+                    start, end = int(span.get("char_start") or 0), int(span.get("char_end") or 0)
+                    if not (0 <= start < end <= len(text)) or text[start:end] != span.get("evidence_text"):
+                        continue
+                    db.conn.execute("""UPDATE page_sources SET locator=?,page_number=?,char_start=?,char_end=?,
+                        paragraph=?,confidence=?,evidence_text=?,section=? WHERE page_id=? AND source_id=?""",
+                        (span.get("locator"), span.get("page_number"), start, end, span.get("paragraph"),
+                         span.get("confidence"), text[start:end], "compiled evidence", row["id"], source_id))
+            db.conn.commit()
+        except (OSError, ValueError, TypeError):
+            # Legacy Wiki indexes still work if an optional manifest is invalid.
+            pass
     return updated
 
 
@@ -286,7 +317,7 @@ def ingest(
         stats["evidence_locators"] = _refresh_evidence_locators(
             config, db, current_source_id=file_hash, current_pages=document.pages
         )
-        graph_stats = extract_graph(db)
+        graph_stats = extract_graph(db, wiki_root=config.wiki_root)
         stats["graph_nodes"] = int(graph_stats["stats"]["nodes"])
         stats["graph_edges"] = int(graph_stats["stats"]["edges"])
         vector_stats = sync_vector_index(db, config.vector_config)
@@ -388,6 +419,9 @@ def delete_source(config: Config, source_id: str, delete_raw: bool = True) -> Di
         )
         db.mark_source_deleted(source_id)
         stats = db.rebuild(WikiManager(config.wiki_root))
+        _refresh_evidence_locators(config, db)
+        extract_graph(db, wiki_root=config.wiki_root)
+        sync_vector_index(db, config.vector_config)
         _log(config, {
             "event": "source_deleted",
             "source_id": source_id,
@@ -414,7 +448,7 @@ def rebuild(config: Config) -> Dict[str, int]:
     try:
         stats = db.rebuild(WikiManager(config.wiki_root))
         stats["evidence_locators"] = _refresh_evidence_locators(config, db)
-        graph_stats = extract_graph(db)
+        graph_stats = extract_graph(db, wiki_root=config.wiki_root)
         stats["graph_nodes"] = int(graph_stats["stats"]["nodes"])
         stats["graph_edges"] = int(graph_stats["stats"]["edges"])
         stats["reviews_added"] = _audit_existing_reviews(config, db)
@@ -429,13 +463,18 @@ def do_search(config: Config, query: str, top_k: Optional[int] = None) -> List[D
     initialize(config)
     db = Database(config.db_path)
     try:
-        return search(
+        results = search(
             db,
             query,
             top_k or config.top_k,
             vector_config=config.vector_config,
             graph_expansion=bool(config.retrieval.get("graph_expansion", True)),
         )
+        # The course's reproducible weighted retriever also supplies candidates
+        # missed by FTS tokenization (notably Chinese questions about English papers).
+        weighted = retrieve_evidence(db, query, top_k or config.top_k)
+        seen = {int(item["page_id"]) for item in weighted}
+        return (weighted + [item for item in results if int(item["page_id"]) not in seen])[:top_k or config.top_k]
     finally:
         db.close()
 
@@ -448,6 +487,12 @@ def do_ask(config: Config, question: str, top_k: Optional[int] = None) -> str:
 def do_ask_with_metadata(config: Config, question: str, top_k: Optional[int] = None) -> Dict[str, Any]:
     results = do_search(config, question, top_k=top_k)
     return answer_with_metadata(question, results, LLMClient(config.llm), context_config=config.retrieval)
+
+
+def do_answer_events(config: Config, question: str, top_k: Optional[int] = None):
+    results = do_search(config, question, top_k=top_k)
+    yield from answer_events(question, results, LLMClient(config.llm),
+                             context_config={**config.retrieval, "top_k": top_k or config.top_k})
 
 
 def parse_only(config: Config, source: Union[str, Path], llm_client: Optional[LLMClient] = None) -> StructuredPaper:

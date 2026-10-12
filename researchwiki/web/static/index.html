@@ -3,27 +3,29 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light dark" />
     <title>ResearchWiki · 可追溯研究知识库</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236ea8ff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='sans-serif' font-size='22' font-weight='700' fill='white'%3ERW%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261012-workbench-4" />
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark">RW</div>
-          <div><strong>ResearchWiki</strong><span>Traceable knowledge</span></div>
+          <div><strong>ResearchWiki</strong><span>论文知识工作空间</span></div>
         </div>
         <nav aria-label="主导航">
           <button class="nav-item active" data-view="dashboard" data-short="总览"><span>01</span>知识工作台</button>
           <button class="nav-item" data-view="documents" data-short="资料"><span>02</span>资料中心</button>
-          <button class="nav-item" data-view="wiki" data-short="Wiki"><span>03</span>Wiki 页面</button>
-          <button class="nav-item" data-view="graph" data-short="图谱"><span>04</span>知识图谱</button>
-          <button class="nav-item" data-view="ask" data-short="问答"><span>05</span>证据问答</button>
-          <button class="nav-item" data-view="evaluation" data-short="评估"><span>06</span>质量评估</button>
-          <button class="nav-item" data-view="reviews" data-short="审核"><span>07</span>Review 队列</button>
-          <button class="nav-item" data-view="settings" data-short="设置"><span>08</span>系统设置</button>
+          <button class="nav-item" data-view="compilation" data-short="编译"><span>03</span>知识编译</button>
+          <button class="nav-item" data-view="wiki" data-short="Wiki"><span>04</span>Wiki 页面</button>
+          <button class="nav-item" data-view="graph" data-short="图谱"><span>05</span>图谱与检索</button>
+          <button class="nav-item" data-view="ask" data-short="问答"><span>06</span>可溯源问答</button>
+          <button class="nav-item" data-view="evaluation" data-short="评估"><span>07</span>固定题库与评估</button>
+          <div class="nav-divider"></div>
+          <button class="nav-item" data-view="reviews" data-short="审核"><span>↳</span>质量审核</button>
+          <button class="nav-item" data-view="settings" data-short="设置"><span>⚙</span>系统设置</button>
         </nav>
         <div class="sidebar-foot">
           <div class="system-dot" id="api-dot"></div>
@@ -39,6 +41,7 @@
           </div>
           <div class="top-actions">
             <div class="model-chip" id="model-chip">模型状态读取中</div>
+            <button class="secondary" id="theme-toggle" aria-label="切换明暗主题">◐</button>
             <button class="primary" id="header-upload">＋ 导入资料</button>
           </div>
         </header>
@@ -47,8 +50,9 @@
           <div class="hero panel">
             <div>
               <p class="eyebrow">LOCAL-FIRST · SOURCE-AWARE</p>
-              <h2>把论文变成可搜索、可互链、可回查的知识层。</h2>
-              <p>原文和 SQLite 索引保留在本地；DeepSeek 只负责结构化抽取与有证据的答案生成。</p>
+              <h2>从一篇论文，走向可追溯的研究知识。</h2>
+              <p>保存原文，编译主题，连接证据。让每一次研究提问都有出处，每一次知识更新都可检查。</p>
+              <div class="hero-actions"><button class="primary" data-jump="ask">开始研究提问 ↗</button><button class="secondary" data-jump="compilation">查看知识编译</button></div>
             </div>
             <div class="hero-status"><span id="hero-provider">DEEPSEEK</span><strong id="hero-model">—</strong><small>服务端配置</small></div>
           </div>
@@ -84,6 +88,7 @@
               <option value="WIKI_CREATED">编译中</option>
               <option value="FAILED">失败</option>
             </select>
+            <select id="type-filter" aria-label="资料类型"><option value="">全部格式</option><option value="pdf">PDF</option><option value="docx">Word</option><option value="md">Markdown</option><option value="txt">TXT</option></select>
             <button class="primary" id="documents-upload">＋ 导入资料</button>
           </div>
           <article class="panel table-panel">
@@ -95,7 +100,20 @@
               </table>
             </div>
             <div id="documents-empty" class="empty-state hidden">没有符合条件的资料。</div>
+            <div class="pagination"><span id="documents-page-info">第 1 页</span><div class="top-actions"><button class="secondary" id="documents-prev">上一页</button><button class="secondary" id="documents-next">下一页</button></div></div>
           </article>
+        </section>
+
+        <section class="view" id="view-compilation">
+          <div class="toolbar panel evaluation-toolbar"><div><p class="eyebrow">KNOWLEDGE COMPILER</p><h3>从原件编译可维护的主题知识</h3></div><button class="primary" id="compile-build">重建知识层</button></div>
+          <div class="notice">保留原始资料与手工笔记。重建使用已有抽取结果更新主题页、证据索引及图谱；新的论文抽取在资料中心发起。</div>
+          <div class="metric-grid" id="compilation-metrics"></div>
+          <div class="compile-progress panel" id="compilation-progress" role="status" aria-live="polite">正在读取编译状态…</div>
+          <div class="dashboard-grid">
+            <article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">BUILD INVENTORY</p><h3>知识产物清单</h3></div><span id="manifest-label" class="truth-label">—</span></div><div id="compilation-manifest"></div></article>
+            <article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">QUEUE</p><h3>处理队列</h3></div><button class="text-button" id="compilation-refresh">刷新</button></div><div id="compilation-jobs"></div></article>
+          </div>
+          <article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">REBUILD HISTORY</p><h3>编译记录</h3></div></div><div id="compilation-history"></div></article>
         </section>
 
         <section class="view" id="view-wiki">
@@ -103,29 +121,29 @@
             <article class="panel list-pane">
               <div class="section-head"><div><p class="eyebrow">COMPILED WIKI</p><h3>主题页面</h3></div><span id="wiki-count" class="truth-label">—</span></div>
               <label class="search-field"><span>⌕</span><input id="wiki-search" type="search" placeholder="搜索 Wiki 标题" /></label>
+              <select id="wiki-type-filter" aria-label="Wiki 页面类型"><option value="">全部主题类型</option><option value="paper">论文</option><option value="method">方法</option><option value="dataset">数据集</option><option value="topic">主题</option></select>
               <div id="wiki-list" class="wiki-list"></div>
             </article>
             <article class="panel detail-pane" id="wiki-detail">
-              <div class="empty-state">选择一个页面查看 Markdown 原文。</div>
+              <div class="empty-state"><strong>阅读主题，也读到它的依据</strong><p>选择页面查看跨来源知识、原文证据与相关主题。</p></div>
             </article>
           </div>
         </section>
 
         <section class="view" id="view-ask">
           <div class="ask-layout">
-            <article class="panel ask-intro">
-              <p class="eyebrow">EVIDENCE FIRST</p>
-              <h2>只基于当前 Wiki 回答</h2>
-              <p>先融合 FTS5、可选向量与页面关系，再按全局上下文预算交给 DeepSeek。模型不可用时会明确切换为本地证据摘录。</p>
-              <div class="notice">没有检索证据时不会调用模型，也不会补写答案。</div>
-            </article>
+            <aside class="panel ask-history"><div class="section-head"><div><p class="eyebrow">RESEARCH THREADS</p><h3>最近提问</h3></div><button class="text-button" id="new-question">＋</button></div><div id="ask-history-list"></div><p class="aside-note">历史仅保存在此浏览器，不参与模型上下文。</p></aside>
             <article class="panel ask-console">
+              <div class="section-head"><div><p class="eyebrow">EVIDENCE FIRST</p><h3>让回答回到论文证据</h3></div><span class="truth-label">仅检索当前知识库</span></div>
+              <div id="ask-question" class="question-bubble hidden"></div>
+              <div id="ask-phases" class="ask-phases" aria-live="polite"></div>
+              <div id="ask-result" class="answer empty-state"><strong>从一个研究问题开始</strong><p>比较方法、寻找数据集，或检查一条研究结论。<br>引用编号会带你定位到右侧原文证据。</p><button class="suggested-question" data-question="这些论文使用了哪些数据集？">这些论文使用了哪些数据集？ ↗</button><button class="suggested-question" data-question="这些研究有哪些局限性？">这些研究有哪些局限性？ ↗</button></div>
               <form id="ask-form">
-                <textarea id="ask-input" rows="4" minlength="2" maxlength="4000" placeholder="例如：这些论文如何处理标签噪声？" required></textarea>
-                <div class="ask-actions"><span id="ask-mode">等待提问</span><button class="primary" id="ask-submit" type="submit">检索并回答</button></div>
+                <textarea id="ask-input" rows="3" minlength="2" maxlength="4000" placeholder="提问，例如：这些论文如何处理标签噪声？" required></textarea>
+                <div class="ask-actions"><span id="ask-mode">没有证据时将明确拒答</span><div class="top-actions"><button class="secondary hidden" id="ask-stop" type="button">停止</button><button class="primary" id="ask-submit" type="submit">检索并回答 ↗</button></div></div>
               </form>
-              <div id="ask-result" class="answer empty-state">答案和来源会显示在这里。</div>
             </article>
+            <aside class="panel ask-evidence"><div class="section-head"><div><p class="eyebrow">SOURCE LOCATOR</p><h3>证据与引用</h3></div><span id="evidence-count" class="truth-label">0</span></div><div id="ask-evidence-list"><div class="empty-state">检索后显示来源、页码与证据片段。</div></div></aside>
           </div>
         </section>
 
@@ -133,28 +151,33 @@
           <div class="graph-toolbar panel">
             <label class="search-field"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索节点" /></label>
             <div id="graph-type-filters" class="graph-filters"></div>
+            <select id="graph-edge-filter" aria-label="图谱关系类型"><option value="">全部关系</option></select>
             <button class="secondary" id="graph-zoom-out">－</button>
             <button class="secondary" id="graph-reset">复位</button>
             <button class="secondary" id="graph-zoom-in">＋</button>
             <button class="primary" id="graph-extract">重新抽取</button>
           </div>
           <div class="graph-stats" id="graph-stats"></div>
+          <div class="graph-legend"><span>拖动画布平移 · 滚轮缩放 · 点击节点回查来源</span><span id="graph-visible-count"></span></div>
           <div class="graph-layout">
             <article class="panel graph-panel"><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="知识图谱画布"></svg></article>
             <aside class="panel graph-detail" id="graph-detail"><div class="empty-state">选择节点查看字段、证据与连接。</div></aside>
           </div>
+          <article class="panel table-panel retrieval-panel"><div class="section-head"><div><p class="eyebrow">RETRIEVAL OBJECTS</p><h3>检索检查</h3></div><span class="truth-label">当前真实索引</span></div><form id="retrieval-form" class="toolbar"><label class="search-field"><input id="retrieval-input" type="search" required maxlength="500" placeholder="输入关键词，检查问答实际可用的知识页" /></label><button class="primary" type="submit">检索</button></form><div id="retrieval-results" class="retrieval-results"><div class="empty-state">查看命中的主题、得分与证据来源。</div></div></article>
         </section>
 
         <section class="view" id="view-evaluation">
           <div class="toolbar panel evaluation-toolbar">
             <div><p class="eyebrow">REPLAYABLE QA</p><h3>固定题库与可重放指标</h3></div>
-            <div class="top-actions"><button class="secondary" id="run-baseline">运行 baseline</button><button class="primary" id="run-optimized">运行 optimized</button></div>
+            <div class="top-actions"><button class="secondary" id="run-baseline">运行基线</button><button class="secondary" id="run-optimized">运行优化版</button><button class="primary" id="run-comparison">运行对照</button></div>
           </div>
           <div class="metric-grid" id="evaluation-metrics"></div>
+          <div class="dashboard-grid"><article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">REGRESSION</p><h3>基线与优化对照</h3></div><span class="truth-label" id="evaluation-gate">等待可比运行</span></div><div id="evaluation-comparison"></div></article><article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">RUN HISTORY</p><h3>运行历史</h3></div></div><div id="evaluation-history"></div></article></div>
           <article class="panel table-panel">
-            <div class="section-head"><div><p class="eyebrow">LATEST RUN</p><h3>逐题结果</h3></div><span class="truth-label" id="evaluation-run-label">尚未运行</span></div>
+            <div class="section-head"><div><p class="eyebrow">SELECTED RUN</p><h3>逐题结果</h3></div><div class="top-actions"><span class="truth-label" id="evaluation-run-label">尚未运行</span><button class="secondary" id="replay-evaluation" disabled>重放本次快照</button></div></div>
             <div id="evaluation-cases" class="evaluation-cases"><div class="empty-state">运行固定题库后显示检索、引用和拒答结果。</div></div>
           </article>
+          <article class="panel table-panel question-bank"><div class="section-head"><div><p class="eyebrow">FIXED QUESTION SET</p><h3>固定题库</h3></div><span class="truth-label" id="question-bank-count">—</span></div><div id="question-bank"></div></article>
         </section>
 
         <section class="view" id="view-reviews">
@@ -181,9 +204,9 @@
       <form method="dialog" class="dialog-card" id="upload-form">
         <div class="section-head"><div><p class="eyebrow">NEW SOURCE</p><h3>导入研究资料</h3></div><button class="icon-button" id="upload-close" type="button" aria-label="关闭">×</button></div>
         <label class="drop-zone" id="drop-zone">
-          <input id="file-input" name="file" type="file" accept=".pdf,.txt,.md,.markdown" required />
-          <strong>选择 PDF、TXT 或 Markdown</strong>
-          <span>文件先保存在本地，再进入 DeepSeek 抽取；最大 50 MiB。</span>
+          <input id="file-input" name="file" type="file" accept=".pdf,.docx,.txt,.md,.markdown" required />
+          <strong id="drop-label">拖入文件，或点击选择</strong>
+          <span>PDF、Word、TXT 或 Markdown · 最大 50 MiB<br>文件先保存在本地，再进入知识抽取。</span>
         </label>
         <div class="privacy-note">论文正文会发送至当前配置的 DeepSeek API。密钥只保存在服务端，不会下发到浏览器。</div>
         <label class="mode-field">处理模式
@@ -205,7 +228,7 @@
       </article>
     </dialog>
 
-    <div class="toast" id="toast" role="status"></div>
-    <script src="/assets/app.js" defer></script>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/assets/app.js?v=20261012-workbench-4" defer></script>
   </body>
 </html>

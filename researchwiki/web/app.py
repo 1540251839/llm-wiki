@@ -16,17 +16,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..app import delete_source, do_ask_with_metadata, do_search, ingest, initialize
+from ..app import delete_source, do_ask_with_metadata, do_answer_events, do_search, ingest, initialize, rebuild
+from ..compilation import CompilationService, compilation_status
 from ..config import Config, load_config
 from ..evaluation import load_questions, run_evaluation
 from ..graph import extract_graph
 from ..index.database import Database
 from ..llm.client import LLMClient
+from ..parsing.pdf import parse_file
+from ..wiki.manager import parse_frontmatter
 
 
 LOGGER = logging.getLogger("researchwiki.web")
 STATIC_ROOT = Path(__file__).with_name("static")
-ALLOWED_SUFFIXES = {".pdf", ".txt", ".md", ".markdown"}
+ALLOWED_SUFFIXES = {".pdf", ".txt", ".md", ".markdown", ".docx"}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 PROCESSING_STATUSES = {"UPLOADED", "EXTRACTING", "EXTRACTED", "WIKI_CREATED"}
 _INGEST_LOCK = threading.Lock()
@@ -96,6 +99,8 @@ def _document(
         "raw_name": Path(raw_path).name if raw_path else "",
         "source_ref": _relative_name(config.root, source_path),
         "raw_ref": _relative_name(config.root, raw_path),
+        "file_type": Path(raw_path or source_path).suffix.lower().lstrip("."),
+        "file_url": "/api/documents/" + str(paper.get("id") or "") + "/file?inline=true",
         "created_at": paper.get("created_at"),
         "updated_at": paper.get("updated_at"),
         "error_message": paper.get("error_message") or None,
@@ -163,7 +168,35 @@ def _public_search_result(config: Config, item: Dict[str, Any]) -> Dict[str, Any
         "path": _relative_name(config.root, str(item.get("path") or "")),
         "excerpt": content[:600],
         "score": item.get("score"),
+        "retrieval_signals": item.get("retrieval_signals") or [],
+        "sources": [_public_evidence(config, value) for value in item.get("sources") or []],
     }
+
+
+def _public_evidence(config: Config, evidence: Dict[str, Any]) -> Dict[str, Any]:
+    value = dict(evidence)
+    for key in ("raw_path", "source_path"):
+        if key in value:
+            value[key] = _relative_name(config.root, str(value[key] or ""))
+    if "original_name" in value:
+        value["original_name"] = Path(str(value["original_name"] or "")).name
+    source_id = str(value.get("source_id") or "")
+    if source_id:
+        page = max(1, int(value.get("page_number") or 1))
+        value["file_url"] = f"/api/documents/{source_id}/file?inline=true#page={page}"
+        value["evidence_url"] = f"/api/documents/{source_id}/evidence?page={page}&start={int(value.get('char_start') or 0)}&end={int(value.get('char_end') or 0)}"
+    return value
+
+
+def _public_answer(config: Config, result: Dict[str, Any], question: str) -> Dict[str, Any]:
+    result = dict(result)
+    result["question"] = question
+    result["degraded"] = result.get("mode") == "local_evidence" and bool(result.get("fallback_reason"))
+    result["answer"] = str(result.get("answer") or "").replace(str(config.root.resolve()) + "/", "")
+    result["sources"] = [{**source, "path": _relative_name(config.root, str(source.get("path") or "")),
+                          "provenance": [_public_evidence(config, value) for value in source.get("provenance") or []]}
+                         for source in result.get("sources") or []]
+    return result
 
 
 def create_app(root: Union[str, Path] = ".") -> FastAPI:
@@ -247,12 +280,12 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             "quality": {"documents_with_warnings": warnings, "orphan_paper_pages": orphan_pages},
             "system": health_payload(),
             "dataflow": [
-                {"key": "source", "label": "来源与哈希", "detail": "SHA-256 身份与不可变原文"},
-                {"key": "queue", "label": "持久化队列", "detail": "阶段、重试和中断记录"},
-                {"key": "extract", "label": "DeepSeek 抽取", "detail": "标准或两阶段高质量模式"},
-                {"key": "wiki", "label": "原子提交", "detail": "整批写入并保留用户笔记"},
-                {"key": "evidence", "label": "证据索引", "detail": "page_sources + 混合检索"},
-                {"key": "review", "label": "Review", "detail": "质量问题进入人工审核"},
+                {"key": "documents", "label": "资料中心", "detail": "原文哈希 · 持久化导入"},
+                {"key": "compilation", "label": "知识编译", "detail": "抽取缓存 · 跨论文聚合"},
+                {"key": "wiki", "label": "Wiki 知识页", "detail": "引用 · 内链 · 人工笔记"},
+                {"key": "graph", "label": "图谱与检索", "detail": "稳定节点边 · 证据对象"},
+                {"key": "ask", "label": "可溯源问答", "detail": "流式回答 · 原文定位"},
+                {"key": "evaluation", "label": "固定题库评估", "detail": "冻结快照 · 对照回放"},
             ],
         }
 
@@ -260,12 +293,13 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     def list_documents(
         q: str = Query(default="", max_length=200),
         status: str = Query(default="", max_length=32),
+        file_type: str = Query(default="", pattern="^(|pdf|md|markdown|txt|docx)$"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=20, ge=1, le=100),
     ) -> Dict[str, Any]:
         db = Database(config.db_path)
         try:
-            result = db.list_papers(query=q, status=status, page=page, page_size=page_size)
+            result = db.list_papers(query=q, status=status, page=page, page_size=page_size, file_type=file_type)
             result["items"] = [
                 _document(config, paper, job=db.latest_ingest_job(str(paper.get("id") or "")))
                 for paper in result["items"]
@@ -307,7 +341,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         filename = _safe_upload_name(file.filename or "document")
         suffix = Path(filename).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
-            raise HTTPException(status_code=415, detail="Supported formats: PDF, TXT, MD")
+            raise HTTPException(status_code=415, detail="Supported formats: PDF, DOCX, TXT, MD")
         payload = await file.read(MAX_UPLOAD_BYTES + 1)
         await file.close()
         if not payload:
@@ -383,11 +417,11 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             source = next((path for path in candidates if path.is_file()), None)
             if source is None:
                 raise HTTPException(status_code=409, detail="The source file is missing; upload it again")
-            db.update_paper_status(paper_id, "UPLOADED")
             previous_job = db.latest_ingest_job(paper_id)
             requested_mode = quality_mode.strip().lower() or str((previous_job or {}).get("quality_mode") or config.quality_mode)
             if requested_mode not in {"standard", "high"}:
                 raise HTTPException(status_code=400, detail="quality_mode must be standard or high")
+            db.update_paper_status(paper_id, "UPLOADED")
             job = db.retry_ingest_job(int(previous_job["id"]), requested_mode) if previous_job else None
             if job is None:
                 job = db.enqueue_ingest_job(
@@ -411,7 +445,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         if not confirm:
             raise HTTPException(status_code=400, detail="Set confirm=true to move this source and generated pages to the workspace trash")
         try:
-            result = delete_source(config, paper_id, delete_raw=delete_raw)
+            with _INGEST_LOCK:
+                result = delete_source(config, paper_id, delete_raw=delete_raw)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         result["recoverable_from"] = _relative_name(config.root, str(result["recoverable_from"]))
@@ -451,6 +486,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             if not db.cancel_ingest_job(job_id):
                 raise HTTPException(status_code=409, detail="Only pending or paused jobs can be cancelled")
             job = db.get_ingest_job(job_id)
+            if job:
+                db.update_paper_status(str(job["source_id"]), "FAILED", "CANCELLED: queued import was cancelled; retry to resume.")
         finally:
             db.close()
         return {"job": job, "action": "cancelled"}
@@ -481,19 +518,60 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         return {"id": review_id, "status": "RESOLVED"}
 
     @app.get("/api/documents/{paper_id}/file")
-    def download_document(paper_id: str) -> FileResponse:
+    def download_document(paper_id: str, inline: bool = False) -> FileResponse:
         db = Database(config.db_path)
         try:
             paper = db.get_paper(paper_id)
         finally:
             db.close()
-        if not paper or not paper.get("raw_path"):
+        if not paper or paper.get("status") == "DELETED" or not paper.get("raw_path"):
             raise HTTPException(status_code=404, detail="Source file not found")
         path = Path(str(paper["raw_path"])).resolve()
         raw_root = (config.root / "raw" / "papers").resolve()
         if not path.exists() or not path.is_relative_to(raw_root):
             raise HTTPException(status_code=404, detail="Source file not found")
-        return FileResponse(path, filename=path.name)
+        return FileResponse(path, filename=path.name, content_disposition_type="inline" if inline else "attachment")
+
+    @app.get("/api/documents/{paper_id}/evidence")
+    def get_document_evidence(paper_id: str, page: int = Query(default=1, ge=1),
+                             start: int = Query(default=0, ge=0), end: int = Query(default=0, ge=0)) -> Dict[str, Any]:
+        response = download_document(paper_id, inline=True)
+        path = Path(response.path)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != paper_id:
+            raise HTTPException(status_code=409, detail="Source hash changed; original evidence cannot be verified")
+        try:
+            document = parse_file(path)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        target = next((value for value in document.pages if value.number == page), None)
+        if target is None or start > len(target.text) or (end and end < start):
+            raise HTTPException(status_code=422, detail="Evidence locator is outside the parsed source")
+        stop = min(end or start + 4000, len(target.text), start + 10000)
+        return {"source_id": paper_id, "page_number": page, "char_start": start, "char_end": stop,
+                "text": target.text[start:stop], "source_hash_verified": True,
+                "pagination": "physical" if path.suffix.lower() == ".pdf" else "logical",
+                "file_url": f"/api/documents/{paper_id}/file?inline=true#page={page}"}
+
+    @app.get("/api/compilation")
+    def get_compilation() -> Dict[str, Any]:
+        return {**compilation_status(config), "busy": _INGEST_LOCK.locked()}
+
+    @app.get("/api/compilation/history")
+    def get_compilation_history() -> Dict[str, Any]:
+        items = CompilationService(config).history()
+        return {"items": items, "total": len(items)}
+
+    @app.post("/api/compilation/build")
+    def build_compilation() -> Dict[str, Any]:
+        if not _INGEST_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="导入或编译正在运行，请完成后再试。")
+        try:
+            report = CompilationService(config).run()
+            if report.get("status") == "succeeded":
+                report["index"] = rebuild(config)
+            return report
+        finally:
+            _INGEST_LOCK.release()
 
     @app.get("/api/wiki/pages")
     def list_wiki_pages(
@@ -518,15 +596,26 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         try:
             page = db.get_wiki_page(page_id)
             related = db.related_pages(page_id) if page else []
+            backlinks = [dict(row) for row in db.conn.execute(
+                "SELECT DISTINCT p.id,p.title,p.type,p.path FROM links l JOIN wiki_pages p ON p.id=l.source_id WHERE l.target_id=? ORDER BY p.title", (page_id,))] if page else []
+            outgoing = [dict(row) for row in db.conn.execute(
+                "SELECT DISTINCT p.id,p.title,p.type,p.path FROM links l JOIN wiki_pages p ON p.id=l.target_id WHERE l.source_id=? ORDER BY p.title", (page_id,))] if page else []
         finally:
             db.close()
         if not page:
             raise HTTPException(status_code=404, detail="Wiki page not found")
         page["path"] = _relative_name(config.root, str(page.get("path") or ""))
-        for source in page.get("sources") or []:
-            source["original_name"] = Path(str(source.get("original_name") or "")).name
-            source["source_path"] = _relative_name(config.root, str(source.get("source_path") or ""))
-            source["raw_path"] = _relative_name(config.root, str(source.get("raw_path") or ""))
+        metadata = parse_frontmatter(str(page.get("content") or ""))
+        declared_sources = metadata.get("sources") or []
+        if not isinstance(declared_sources, list):
+            declared_sources = []
+        order = {str(value): index for index, value in enumerate(declared_sources, 1)}
+        sources = sorted(page.get("sources") or [], key=lambda source: order.get(str(source.get("source_id")), len(order) + 1))
+        page["sources"] = [{**_public_evidence(config, source),
+                            "citation_index": order.get(str(source.get("source_id")), index)}
+                           for index, source in enumerate(sources, 1)]
+        page["backlinks"] = [{**item, "path": _relative_name(config.root, str(item["path"]))} for item in backlinks]
+        page["outgoing"] = [{**item, "path": _relative_name(config.root, str(item["path"]))} for item in outgoing]
         page["related"] = [
             {**item, "path": _relative_name(config.root, str(item.get("path") or ""))}
             for item in related
@@ -538,7 +627,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         db = Database(config.db_path)
         try:
             if db.graph_overview()["stats"]["nodes"] == 0 and db.count_wiki_pages() > 0:
-                extract_graph(db)
+                extract_graph(db, wiki_root=config.wiki_root)
             value = db.graph(limit=limit)
         finally:
             db.close()
@@ -556,7 +645,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         db = Database(config.db_path)
         try:
             if db.graph_overview()["stats"]["nodes"] == 0 and db.count_wiki_pages() > 0:
-                extract_graph(db)
+                extract_graph(db, wiki_root=config.wiki_root)
             items = db.list_graph_nodes(node_type=type, query=q, limit=limit)
         finally:
             db.close()
@@ -573,7 +662,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         db = Database(config.db_path)
         try:
             if db.graph_overview()["stats"]["nodes"] == 0 and db.count_wiki_pages() > 0:
-                extract_graph(db)
+                extract_graph(db, wiki_root=config.wiki_root)
             items = db.list_graph_edges(semantic=semantic, limit=limit)
         finally:
             db.close()
@@ -581,11 +670,12 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
 
     @app.post("/api/graph/extract")
     def reextract_graph() -> Dict[str, Any]:
-        db = Database(config.db_path)
-        try:
-            value = extract_graph(db)
-        finally:
-            db.close()
+        with _INGEST_LOCK:
+            db = Database(config.db_path)
+            try:
+                value = extract_graph(db, wiki_root=config.wiki_root)
+            finally:
+                db.close()
         return {
             "ok": True,
             "mode": value["mode"],
@@ -602,25 +692,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     @app.post("/api/ask")
     def ask(request: AskRequest) -> Dict[str, Any]:
         result = do_ask_with_metadata(config, request.question, top_k=request.top_k)
-        result["question"] = request.question
-        result["degraded"] = result.get("mode") == "local_evidence" and bool(result.get("fallback_reason"))
-        public_sources = []
-        answer_text = str(result.get("answer") or "")
-        for source in result.get("sources", []):
-            private_path = str(source.get("path") or "")
-            public_path = _relative_name(config.root, private_path)
-            if private_path:
-                answer_text = answer_text.replace(private_path, public_path)
-            provenance = []
-            for evidence in source.get("provenance") or []:
-                raw_path = str(evidence.get("raw_path") or "")
-                provenance.append({**evidence, "raw_path": _relative_name(config.root, raw_path)})
-                if raw_path:
-                    answer_text = answer_text.replace(raw_path, _relative_name(config.root, raw_path))
-            public_sources.append({**source, "path": public_path, "provenance": provenance})
-        result["answer"] = answer_text
-        result["sources"] = public_sources
-        return result
+        return _public_answer(config, result, request.question)
 
     @app.post("/api/ask/stream")
     def ask_stream(request: AskRequest) -> StreamingResponse:
@@ -630,15 +702,14 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         def generate() -> Iterator[str]:
             yield event("status", {"stage": "retrieval", "message": "正在检索 Wiki 证据"})
             try:
-                result = ask(request)
-                yield event("status", {
-                    "stage": "generation" if result.get("mode") == "llm" else "evidence",
-                    "message": "正在组织有引用的答案",
-                })
-                yield event("result", result)
+                for item in do_answer_events(config, request.question, top_k=request.top_k):
+                    payload = item["data"]
+                    if item["event"] in {"sources", "result"}:
+                        payload = _public_answer(config, payload, request.question)
+                    yield event(item["event"], payload)
             except Exception as exc:
                 yield event("error", {"message": str(exc)})
-        return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+        return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/evaluation/questions")
     def evaluation_questions() -> Dict[str, Any]:
@@ -674,6 +745,25 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     @app.post("/api/evaluation/run")
     def start_evaluation(profile: str = Query(default="optimized", pattern="^(baseline|optimized)$")) -> Dict[str, Any]:
         value = run_evaluation(config, profile=profile)
+        return evaluation_run(int(value["id"]))
+
+    @app.post("/api/evaluation/compare")
+    def compare_evaluation() -> Dict[str, Any]:
+        from ..evaluation.runner import compare_profiles
+        value = compare_profiles(config)
+        for profile in ("baseline", "optimized"):
+            value[profile] = evaluation_run(int(value[profile]["id"]))
+        value.setdefault("comparison", value.get("compare") or value.get("gate") or {})
+        value.setdefault("gate", value["comparison"])
+        return value
+
+    @app.post("/api/evaluation/runs/{run_id}/replay")
+    def replay_run(run_id: int) -> Dict[str, Any]:
+        from ..evaluation.runner import replay_evaluation
+        try:
+            value = replay_evaluation(config, run_id)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return evaluation_run(int(value["id"]))
 
     @app.get("/api/settings")
