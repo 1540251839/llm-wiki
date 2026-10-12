@@ -942,7 +942,10 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             raise HTTPException(status_code=422, detail="Invalid API key format")
         with _SETTINGS_LOCK:
             save_deepseek_key(config.root, secret)
-            config.llm = {**config.llm, "provider": "deepseek", "api_key": secret}
+            config.llm = {**config.llm, "provider": "deepseek",
+                          "base_url": "https://api.deepseek.com",
+                          "model": config.llm.get("model") if config.llm.get("provider") == "deepseek" else "deepseek-chat",
+                          "api_key": secret}
         return {"ok": True, "configured": True, "stored_locally": True}
 
     @app.delete("/api/settings/deepseek-key")
