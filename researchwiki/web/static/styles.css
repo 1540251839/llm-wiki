@@ -672,3 +672,20 @@ dialog::backdrop { background: #14232c77; backdrop-filter: blur(3px); }
   .wiki-type-tabs { gap: 3px; }
   .wiki-type-tab { font-size: 10px; padding: 8px 1px; }
 }
+
+/* Reader-first Wiki article: answers visible, evidence/engineering details on demand */
+.wiki-reading-header { margin-bottom: 26px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
+.wiki-reading-header h2 { font-size: clamp(20px, 2.4vw, 30px); line-height: 1.4; }
+.wiki-original-title { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.wiki-reading-question { font-size: 13px; line-height: 1.75; background: var(--accent-soft); padding: 13px 16px; border-radius: 9px; margin: 14px 0; }
+.wiki-reading-body { max-width: 850px; }
+.wiki-section { padding-bottom: 22px; margin: 0 0 21px; border-bottom: 1px solid var(--line); }
+.wiki-section > h3 { font-size: 16px; font-weight: 650; margin: 0 0 13px; }
+.wiki-section .prose { font-size: 13px; line-height: 1.85; }
+.wiki-section .prose h3 { font-size: 13px; margin: 12px 0; }
+.wiki-section .prose p { margin-bottom: 9px; }
+.wiki-supplement { border-bottom: 1px solid var(--line); padding: 15px 3px; }
+.wiki-supplement > summary { cursor: pointer; color: var(--text); font-weight: 600; font-size: 12px; }
+.wiki-supplement > .prose { padding: 15px 0 3px; }
+.wiki-supplement > .evidence-strip { padding-top: 15px; }
+.wiki-supplement > pre { max-height: 340px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
