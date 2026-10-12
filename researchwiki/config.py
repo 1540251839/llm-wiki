@@ -193,10 +193,14 @@ def load_config(root: Union[str, Path] = ".") -> Config:
                 break
     # Explicitly saved local API key takes precedence over inherited shell/.env
     # credentials so the web settings page remains consistent after a restart.
-    if str(merged["llm"].get("provider") or "").lower() == "deepseek":
-        saved_key = read_deepseek_key(root_path)
-        if saved_key:
-            merged["llm"] = dict(merged["llm"], api_key=saved_key)
+    saved_key = read_deepseek_key(root_path)
+    if saved_key:
+        was_deepseek = str(merged["llm"].get("provider") or "").lower() == "deepseek"
+        merged["llm"] = dict(
+            merged["llm"], api_key=saved_key, provider="deepseek",
+            base_url="https://api.deepseek.com",
+            model=merged["llm"].get("model") if was_deepseek else "deepseek-chat",
+        )
     return Config(
         root=root_path,
         llm=merged["llm"],
