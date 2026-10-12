@@ -16,6 +16,7 @@ from ..config import Config
 from ..index.database import Database
 from ..llm.client import LLMClient
 from ..models import StructuredPaper
+from .prompts import answer_language_rules
 from ..wiki.manager import normalize_name
 
 SYNTHESIS_SYSTEM = """Create a careful, source-bounded comparison of multiple research papers.
@@ -123,7 +124,7 @@ def synthesize_topic(config: Config, title: str, llm: Optional[LLMClient] = None
         "limitations": paper.limitations[:6],
     } for source_id, paper in papers]
     response = client.structured(
-        SYNTHESIS_SYSTEM,
+        SYNTHESIS_SYSTEM + answer_language_rules(config.wiki_language),
         "Research topic: " + title + "\n\n" +
         json.dumps(context, ensure_ascii=False),
     )
