@@ -32,10 +32,11 @@ _JOURNAL_HEADERS = (
     "proceedings of", "arxiv:", "doi:", "http:", "https:", "www.",
 )
 _STOP_SECTION = re.compile(
-    r"(?im)^\s*(?:key\s*words|keywords?|index\s+terms|关键词|"
-    r"(?:\d{1,2}\s*[.、)]?\s*)?(?:introduction|background|related work|引言|绪论|前言)|"
-    r"a\s*b\s*s\s*t\s*r\s*a\s*c\s*t|摘要|"
-    r"(?:2|ii)\s*[.、 ]\s*\S+)\s*[:：—-]?\s*$"
+    r"(?im)^\\s*(?:key\\s*words|keywords?|index\\s+terms|关键词)\\b|"
+    r"(?im:^\\s*(?:\\d{1,2}\\s*[.、)]?\\s*)?(?:introduction|background|related work|引言|绪论|前言)\\b)|"
+    r"(?im:^\\s*a\\s*b\\s*s\\s*t\\s*r\\s*a\\s*c\\s*t\\b)|"
+    r"(?im:^\\s*(?:2|ii)\\s*[.、 ]\\s*\\S+)"
+
 )
 
 
@@ -45,7 +46,7 @@ def _compact(text: str) -> str:
 
 def _plausible_title(value: str) -> bool:
     name = _compact(value)
-    if len(name) < 15 or len(name) > 230:
+    if len(name) < 8 or len(name) > 230:
         return False
     lower = name.casefold()
     if any(lower.startswith(prefix) for prefix in _JOURNAL_HEADERS):
