@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+from .secrets import read_deepseek_key
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "llm": {
@@ -189,6 +191,12 @@ def load_config(root: Union[str, Path] = ".") -> Config:
             if value:
                 merged["llm"] = dict(merged["llm"], api_key=value)
                 break
+    # Explicitly saved local API key takes precedence over inherited shell/.env
+    # credentials so the web settings page remains consistent after a restart.
+    if str(merged["llm"].get("provider") or "").lower() == "deepseek":
+        saved_key = read_deepseek_key(root_path)
+        if saved_key:
+            merged["llm"] = dict(merged["llm"], api_key=saved_key)
     return Config(
         root=root_path,
         llm=merged["llm"],
