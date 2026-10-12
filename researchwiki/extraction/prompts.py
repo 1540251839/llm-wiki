@@ -21,6 +21,28 @@ Return only valid JSON with this shape:
 }"""
 
 
+DEEP_EXTRACTION_SYSTEM = """You analyze a scientific paper to enrich an existing offline metadata record.
+Return ONLY a JSON object. Use the source text, not guesses or prior training knowledge.
+Do not reconstruct the abstract or invent author keywords. Leave unsupported claims blank.
+The desired schema is:
+{
+  "research_problem": "string",
+  "methodology": "string",
+  "methods": [{"name": "string", "description": "definition from the paper", "role": "application", "principle": "explicit mechanism"}],
+  "datasets": [{"name": "string", "description": "string", "role": "verified experimental usage or mention", "statistics": "explicit source numbers only"}],
+  "experiment_info": "datasets, setup, baselines and metrics as explicitly stated",
+  "metrics": ["string"],
+  "contributions": ["string"],
+  "findings": ["string"],
+  "limitations": ["string"],
+  "topics": ["broad research-topic label"]
+}
+Avoid generic keywords as methods. Do not infer experiment usage from a dataset name appearing only in related work.
+Differentiate the authors' stated claims from independently established facts.
+Every statement must be supported by the supplied paper text. Missing details become empty strings/lists.
+Never output an unsupported numerical claim. No markdown fences or commentary."""
+
+
 PAPER_ANALYSIS_SYSTEM = """You are preparing a scientific document for a traceable research wiki.
 Produce concise final analysis notes only; do not reveal chain-of-thought.
 Identify the document title, key entities, methods, datasets, claims, limitations,
