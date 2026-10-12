@@ -92,3 +92,17 @@ def test_focused_ingest_and_four_type_graph(tmp_path):
         assert response.status_code == 200, response.text
         assert response.json()["mode"] == "research"
         assert "固定题库与评估" not in client.get("/").text
+
+
+def test_index_rebuild_reuses_unchanged_pages(tmp_path):
+    from researchwiki.app import rebuild
+    config = load_config(tmp_path)
+    sample = tmp_path / "only-paper.txt"
+    sample.write_text("A Research Paper\nAbstract: This paper describes a legal retrieval approach "
+                      "and evaluates experimental classification results on a known benchmark.")
+    assert ingest(config, sample, quality_mode="standard", llm_client=FakeModel())["status"] == "indexed"
+    first = rebuild(config)
+    second = rebuild(config)
+    assert second["reused"] >= 1
+    assert second["refreshed"] == 0
+    assert first["pages"] == second["pages"]
