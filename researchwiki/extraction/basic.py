@@ -32,6 +32,10 @@ def extract_basic(document: ParsedDocument) -> StructuredPaper:
     title = next((line for line in lines[:20] if 16 <= len(line) <= 240 and not rejected.search(line)), "")
     if not title:
         title = "Untitled Paper"
+    author_match = re.search(r"(?im)^\s*(?:authors?|作者)\s*[:：]\s*(.+)$", head[:3000])
+    authors = []
+    if author_match:
+        authors = [_normalize(name) for name in re.split(r"[,;，；、]", author_match.group(1)) if _normalize(name)]
     year_match = re.search(r"\b(?:19|20)\d{2}\b", head[:5000])
     year = int(year_match.group()) if year_match else None
     # English scientific abstracts with an explicit section boundary only.
@@ -58,4 +62,4 @@ def extract_basic(document: ParsedDocument) -> StructuredPaper:
     for name, pattern in KNOWN_DATASETS.items():
         if re.search(pattern, full, re.I):
             datasets.append(EntityMention(name=name, role="文中提及；实验使用情况待核实"))
-    return StructuredPaper(title=title, year=year, abstract=abstract, keywords=keywords, datasets=datasets)
+    return StructuredPaper(title=title, authors=authors, year=year, abstract=abstract, keywords=keywords, datasets=datasets)
