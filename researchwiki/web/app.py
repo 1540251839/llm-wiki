@@ -22,6 +22,7 @@ from ..compilation import CompilationService, compilation_status
 from ..config import Config, load_config
 from ..evaluation import load_questions, run_evaluation
 from ..graph import extract_graph
+from ..graph.research import project_research_graph
 from ..index.database import Database
 from ..llm.client import LLMClient
 from ..parsing.pdf import parse_file
@@ -722,6 +723,19 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             for item in related
         ]
         return page
+
+    @app.get("/api/graph/research")
+    def get_research_graph(
+        center: str = Query(default="", max_length=100),
+        depth: int = Query(default=1, ge=1, le=2),
+        limit: int = Query(default=130, ge=1, le=400),
+    ) -> Dict[str, Any]:
+        db = Database(config.db_path)
+        try:
+            return project_research_graph(db, config.root, center=center or None,
+                                          depth=depth, limit=limit)
+        finally:
+            db.close()
 
     @app.get("/api/graph")
     def get_graph(limit: int = Query(default=500, ge=1, le=2000)) -> Dict[str, Any]:
