@@ -107,7 +107,7 @@ class ResearchWikiV0Test(unittest.TestCase):
                 "KIMI_API_KEY": "",
                 "OPENAI_API_KEY": "",
             }, clear=False):
-                with self.assertRaisesRegex(RuntimeError, "LLM is required"):
+                with self.assertRaisesRegex(RuntimeError, "Deep extraction requires"):
                     ingest(config, source, quality_mode="standard")
             import sqlite3
             connection = sqlite3.connect(root / "data" / "researchwiki.db")
