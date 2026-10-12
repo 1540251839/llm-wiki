@@ -146,7 +146,7 @@ def _drain_ingest_queue(root: Path) -> None:
                     config,
                     source,
                     resume=True,
-                    quality_mode=str(job.get("quality_mode") or "standard"),
+                    quality_mode=str(job.get("quality_mode") or "basic"),
                     job_id=int(job["id"]),
                 )
             except Exception as exc:  # ingest persists FAILED before returning here
@@ -333,7 +333,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     @app.post("/api/documents", status_code=202)
     async def upload_document(
         file: UploadFile = File(...),
-        quality_mode: str = Form(default="standard"),
+        quality_mode: str = Form(default="basic"),
     ) -> Dict[str, Any]:
         quality_mode = quality_mode.strip().lower()
         if quality_mode not in {"basic", "standard", "high"}:
@@ -455,8 +455,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 if source is None:
                     raise HTTPException(status_code=409, detail="Original source file is missing")
                 job = db.enqueue_ingest_job(paper_id, str(source), quality_mode, config.max_ingest_attempts)
-                db.update_paper_status(paper_id, "UPLOADED")
-            finally:
+                finally:
                 db.close()
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"action": "queued", "job": job, "source_id": paper_id}
