@@ -215,13 +215,14 @@
           <strong id="drop-label">拖入文件，或点击选择</strong>
           <span>PDF、Word、TXT 或 Markdown · 最大 50 MiB<br>文件先保存在本地，再进入知识抽取。</span>
         </label>
-        <div class="privacy-note">论文正文会发送至当前配置的 DeepSeek API。密钥只保存在服务端，不会下发到浏览器。</div>
+        <div class="privacy-note">基础模式只在本机解析论文；选择深度模式后，论文正文才发送至配置的模型服务。</div>
         <label class="mode-field">处理模式
           <select id="quality-mode" name="quality_mode">
-            <option value="standard">标准：一次结构化抽取</option>
-            <option value="high">高质量：先分析，再生成</option>
+            <option value="basic">基础抽取（离线，不调用模型）</option>
+            <option value="standard">深度抽取（调用一次模型）</option>
+            <option value="high">深度高质量（先分析、再抽取）</option>
           </select>
-          <small>高质量模式通常会多调用一次模型。</small>
+          <small>基础模式提取明确文本字段和已知数据集名称；深度模式补充方法、主题和实验分析。</small>
         </label>
         <div class="dialog-actions"><button class="secondary" id="upload-cancel" type="button">取消</button><button class="primary" id="upload-submit" type="submit">上传并处理</button></div>
         <p id="upload-message" class="form-message"></p>
