@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union, Optional
 
 from .config import Config
-from .extraction.paper import analyze_paper, extract_paper, enrich_paper
+from .extraction.paper import analyze_paper, extract_paper, enrich_paper, supplement_paper
 from .extraction.basic import extract_basic
 from .graph import extract_graph
 from .index.database import Database
@@ -253,6 +253,7 @@ def ingest(
     llm_client: Optional[LLMClient] = None,
     quality_mode: Optional[str] = None,
     job_id: Optional[int] = None,
+    focus: str = "",
 ) -> Dict[str, Any]:
     initialize(config)
     source_path = Path(source).expanduser().resolve()
@@ -265,10 +266,15 @@ def ingest(
         if mode not in {"basic", "standard", "high"}:
             raise ValueError("quality_mode must be basic, standard or high")
         duplicate = db.find_by_hash(file_hash)
-        previous_indexed = bool(duplicate and duplicate["status"] == "INDEXED")
         extraction_path = config.root / "data" / "extractions" / (file_hash + ".json")
-        previous_extraction = extraction_path.read_bytes() if previous_indexed and extraction_path.exists() else None
+        # A queued enrichment temporarily marks an indexed document UPLOADED.
+        # Its previous good cache must still be preserved for failure recovery.
+        previous_indexed = bool(duplicate and extraction_path.is_file())
+        previous_extraction = extraction_path.read_bytes() if previous_indexed else None
         previous_record = db.get_paper(file_hash) if previous_indexed else None
+        if focus and (focus not in {"method", "experiment", "overview"} or
+                      not previous_extraction or mode == "basic"):
+            raise ValueError("Focused extraction requires an indexed cache and a deep mode")
         if duplicate and duplicate["status"] == "INDEXED" and not resume:
             return {"status": "already_exists", "title": duplicate["title"], "paper_path": None, "entity_paths": []}
         _job_stage(db, job_id, "COPY_SOURCE")
@@ -318,16 +324,24 @@ def ingest(
         else:
             llm = llm_client or LLMClient(config.llm)
             analysis = ""
-            if mode == "high":
+            if focus:
+                previous = StructuredPaper.from_dict(json.loads(previous_extraction.decode("utf-8")))
+                if previous.source_hash != file_hash:
+                    raise ValueError("Previous cached source hash does not match")
+                paper = supplement_paper(
+                    document, previous, llm, focus, language=config.wiki_language
+                )
+            elif mode == "high":
                 _job_stage(db, job_id, "ANALYZE")
                 analysis = analyze_paper(document, llm=llm, purpose=_purpose(config), language=config.wiki_language)
                 analysis_path = config.root / "data" / "analyses" / (file_hash + ".md")
                 _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
-            paper = enrich_paper(
-                document, baseline=base, llm=llm, analysis=analysis,
-                purpose=_purpose(config), quality_mode=mode, source_path=source_path,
-                language=config.wiki_language,
-            )
+            if not focus:
+                paper = enrich_paper(
+                    document, baseline=base, llm=llm, analysis=analysis,
+                    purpose=_purpose(config), quality_mode=mode, source_path=source_path,
+                    language=config.wiki_language,
+                )
         title_duplicate = db.find_indexed_title_duplicate(paper.title, file_hash)
         if title_duplicate:
             raise RuntimeError(
