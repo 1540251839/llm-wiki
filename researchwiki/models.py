@@ -33,6 +33,7 @@ class StructuredPaper:
     abstract: Optional[str] = None
     keywords: List[str] = field(default_factory=list)
     experiment_info: str = ""
+    extraction_mode: str = "deep"
     research_problem: str = ""
     methodology: str = ""
     methods: List[EntityMention] = field(default_factory=list)
@@ -78,6 +79,7 @@ class StructuredPaper:
             abstract=data.get("abstract"),
             keywords=[str(x).strip() for x in (data.get("keywords") or []) if str(x).strip()],
             experiment_info=str(data.get("experiment_info") or ""),
+            extraction_mode=str(data.get("extraction_mode") or "deep"),
             research_problem=str(data.get("research_problem") or ""),
             methodology=str(data.get("methodology") or ""),
             methods=entities("methods"),
