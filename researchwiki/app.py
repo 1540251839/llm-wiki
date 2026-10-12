@@ -18,6 +18,7 @@ from .index.database import Database
 from .llm.client import LLMClient
 from .models import StructuredPaper
 from .parsing.pdf import parse_file
+from .parsing.grobid import header_metadata
 from .qa.engine import answer, answer_with_metadata, answer_events
 from .qa.retrieval import retrieve_evidence
 from .retrieval.search import search
@@ -293,6 +294,14 @@ def ingest(
         db.update_paper_status(file_hash, "EXTRACTING")
         _job_stage(db, job_id, "EXTRACT")
         base = extract_basic(document, source_path=source_path, workspace_root=config.root)
+        # Optional local scholarly header parser; never overwrites an explicit
+        # verified title/abstract with empty data or requires a remote service.
+        header = header_metadata(source_path, str(config.parser.get("grobid_url") or ""))
+        if header.get("title") and (base.title == "Untitled Paper" or source_path.suffix.lower() == ".pdf"):
+            base.title = header["title"]
+        base.authors = header.get("authors") or base.authors
+        base.abstract = header.get("abstract") or base.abstract
+        base.keywords = header.get("keywords") or base.keywords
         if previous_extraction is not None and mode != "basic":
             previous = StructuredPaper.from_dict(json.loads(previous_extraction.decode("utf-8")))
             if previous.source_hash == file_hash:
@@ -554,6 +563,11 @@ def parse_only(
     path = Path(source).expanduser().resolve()
     document = parse_file(path)
     base = extract_basic(document, source_path=path, workspace_root=config.root)
+    header = header_metadata(path, str(config.parser.get("grobid_url") or ""))
+    base.title = header.get("title") or base.title
+    base.authors = header.get("authors") or base.authors
+    base.abstract = header.get("abstract") or base.abstract
+    base.keywords = header.get("keywords") or base.keywords
     if mode == "basic":
         return base
     if mode not in {"standard", "high"}:
