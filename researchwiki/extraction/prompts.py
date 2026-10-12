@@ -97,9 +97,9 @@ OUTPUT LANGUAGE POLICY — SIMPLIFIED CHINESE FIRST:
 - Preserve the exact original paper title, author names, year, abstract,
   author-supplied keywords, dataset/method names, model acronyms, DOI and
   evidence quotations. Do not silently replace original names with translations.
-- If the source has an abstract, optionally provide its faithful Chinese rendering
-  in abstract_zh; never overwrite the original abstract. If insufficient source
-  evidence exists, return an empty abstract_zh.
+- If the source contains a readable abstract, provide its faithful Chinese
+  rendering in abstract_zh. Never overwrite the original abstract. If no
+  abstract exists in the source, return an empty abstract_zh.
 - Optional name_zh and topic_labels_zh are human-readable Chinese display labels,
   not new entities or facts. Keep canonical names in name/topics unchanged.
 - Do not infer experimental use from a mention alone, invent translations of
