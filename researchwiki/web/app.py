@@ -636,16 +636,33 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         type: str = Query(default="", max_length=32),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> Dict[str, Any]:
+        # Stable page identity remains its original name; Chinese aliases are display-only.
+        manifest = CompilationService(config).manifest()
+        labels = {
+            str(item.get("path") or ""): str(item.get("display_title") or item.get("title") or "")
+            for item in manifest.get("pages", [])
+            if isinstance(item, dict)
+        }
+        def localized(page: Dict[str, Any]) -> Dict[str, Any]:
+            relative = _relative_name(config.root, str(page.get("path") or ""))
+            return {**page, "path": relative,
+                    "display_title": labels.get(relative) or str(page.get("title") or "")}
+
         db = Database(config.db_path)
         try:
-            pages = db.list_wiki_pages(query=q, page_type=type, limit=limit)
-            total = db.count_wiki_pages(query=q, page_type=type)
+            if q.strip() and re.search(r"[\u3400-\u9fff]", q):
+                # The SQL title index uses original names; include Chinese display aliases.
+                all_pages = [localized(row) for row in db.list_wiki_pages(page_type=type, limit=100000)]
+                found = [item for item in all_pages if q.casefold() in
+                         (item["title"] + " " + item["display_title"]).casefold()]
+                total = len(found)
+                pages = found[:limit]
+            else:
+                pages = [localized(row) for row in db.list_wiki_pages(query=q, page_type=type, limit=limit)]
+                total = db.count_wiki_pages(query=q, page_type=type)
         finally:
             db.close()
-        return {
-            "items": [{**page, "path": _relative_name(config.root, str(page.get("path") or ""))} for page in pages],
-            "total": total,
-        }
+        return {"items": pages, "total": total}
 
     @app.get("/api/wiki/pages/{page_id}")
     def get_wiki_page(page_id: int) -> Dict[str, Any]:
@@ -663,6 +680,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             raise HTTPException(status_code=404, detail="Wiki page not found")
         page["path"] = _relative_name(config.root, str(page.get("path") or ""))
         metadata = parse_frontmatter(str(page.get("content") or ""))
+        page["display_title"] = str(metadata.get("display_title") or page["title"])
         declared_sources = metadata.get("sources") or []
         if not isinstance(declared_sources, list):
             declared_sources = []
@@ -834,6 +852,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "configured": llm.enabled,
                 "timeout_seconds": llm.timeout_seconds,
             },
+            "wiki": {"language": config.wiki_language, "original_text_preserved": True},
             "retrieval": {
                 "top_k": config.top_k,
                 "graph_expansion": bool(config.retrieval.get("graph_expansion", True)),
