@@ -25,7 +25,7 @@ retrieval:
     timeout_seconds: 60
 
 ingestion:
-  quality_mode: standard
+  quality_mode: basic
   max_attempts: 3
 
 parser:
