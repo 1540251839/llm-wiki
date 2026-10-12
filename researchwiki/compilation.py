@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .config import Config
+from .extraction.synthesis import load_topic_synthesis
 from .index.database import Database
 from .models import ParsedDocument, StructuredPaper
 from .parsing.pdf import parse_file
@@ -311,6 +312,23 @@ class CompilationService:
                 if kind != "topic" and role.strip():
                     lines.append("  - 用途：" + role + f" [{index}]")
             lines.extend(["", "## 证据说明", "", "此页仅汇总各来源中相关的知识与出处，不重复整篇论文摘要或完整实验结论。来源摘录不等于对每条论断独立核验。", ""])
+        if spec["type"] == "topic":
+            summary = load_topic_synthesis(
+                self.config.root, spec["title"],
+                [(source.source_id, source.paper) for source, _, _ in contributors],
+            )
+            if summary is not None:
+                references = {source.source_id: i for i, (source, _, _) in enumerate(contributors, 1)}
+                lines.extend(["## 深度跨论文综合（待人工复核）", "",
+                              "以下结论由模型根据结构化抽取记录生成，并非已核实的原文级事实。", ""])
+                for heading, key in (("研究发现与比较", "claims"), ("开放问题", "open_questions")):
+                    lines.extend(["### " + heading, ""])
+                    for item in summary.get(key, []):
+                        nums = [references.get(source_id) for source_id in item.get("source_ids", [])]
+                        if all(nums) and nums:
+                            citations = " ".join(f"[{num}]" for num in nums)
+                            lines.append("- " + str(item["text"]) + " " + citations)
+                    lines.append("")
         lines.extend(["## 来源证据", ""])
         for index, ((source, _, _), span) in enumerate(zip(contributors, evidence), 1):
             label = "原文命中" if span["confidence"] == "exact_text" else "来源摘录（未定位到主题原词，不代表逐条论断已核验）"
