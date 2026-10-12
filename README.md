@@ -35,7 +35,8 @@ cd /Users/w/Documents/ChatGPT/llmwiki
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-export DEEPSEEK_API_KEY='替换为你的-key'
+# 只有使用深度抽取 / 跨论文综合时才需要配置 DeepSeek Key：
+# export DEEPSEEK_API_KEY='替换为你的-key'
 rw init
 rw web --host 127.0.0.1 --port 8765
 ```
