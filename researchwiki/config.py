@@ -14,7 +14,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "timeout_seconds": 180,
         "max_retries": 1,
     },
-    "wiki": {"root": "./wiki"},
+    "wiki": {"root": "./wiki", "language": "zh-CN"},
     "database": {"path": "./data/researchwiki.db"},
     "retrieval": {
         "top_k": 8,
@@ -51,6 +51,13 @@ class Config:
     @property
     def wiki_root(self) -> Path:
         return self._resolve(self.wiki.get("root", "./wiki"))
+
+    @property
+    def wiki_language(self) -> str:
+        """Default response language. Original source fields remain unchanged."""
+        language = str(self.wiki.get("language") or "zh-CN").strip().lower()
+        return "zh-CN" if language.startswith("zh") else "en"
+
 
     @property
     def db_path(self) -> Path:
