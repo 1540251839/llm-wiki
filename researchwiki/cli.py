@@ -33,6 +33,8 @@ def _parser() -> argparse.ArgumentParser:
     ask_cmd = sub.add_parser("ask", help="answer a question from retrieved Wiki pages")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--top-k", type=int, default=None)
+    synth_cmd = sub.add_parser("synthesize", help="optional LLM synthesis of at least two deep-extracted papers on a topic")
+    synth_cmd.add_argument("topic", help="exact research topic page title")
     sub.add_parser("build", help="rebuild the Wiki index and page links")
     compile_cmd = sub.add_parser("compile", help="compile cached paper extractions into traceable Wiki pages")
     compile_cmd.add_argument("--dry-run", action="store_true", help="inspect inputs and planned changes without writing")
@@ -83,6 +85,15 @@ def main(argv: Any = None) -> None:
                 print(f"{index}. [{result['type']}] {result['title']} — {result['path']}")
         elif args.command == "ask":
             print(do_ask(config, args.question, args.top_k))
+        elif args.command == "synthesize":
+            from .extraction.synthesis import synthesize_topic
+            from .compilation import CompilationService
+            value = synthesize_topic(config, args.topic)
+            report = CompilationService(config).run()
+            if report["status"] != "succeeded":
+                raise RuntimeError("Topic synthesis was cached but compilation failed: " + str(report.get("diagnostics")))
+            rebuild(config)
+            print(json.dumps({"topic": args.topic, "summary": value}, ensure_ascii=False, indent=2))
         elif args.command == "build":
             stats = rebuild(config)
             print(f"Built index: {stats['pages']} pages, {stats['links']} links, {stats['stale']} stale pages removed")
