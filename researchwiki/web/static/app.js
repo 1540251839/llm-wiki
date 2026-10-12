@@ -1,7 +1,7 @@
 const state = {
   health: null,
   overview: null,
-  activeView: "dashboard",
+  activeView: "documents",
   modelConfigured: false,
   pollTimer: null,
   askRequestId: 0,
@@ -69,7 +69,7 @@ function statusClass(status) {
 }
 
 function showView(name) {
-  if (!document.getElementById(`view-${name}`)) name = "dashboard";
+  if (!document.getElementById(`view-${name}`)) name = "documents";
   state.activeView = name;
   history.replaceState(null, "", `#${name}`);
   $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === name));
@@ -81,18 +81,17 @@ function showView(name) {
     wiki: ["COMPILED KNOWLEDGE", "Wiki 页面"],
     graph: ["KNOWLEDGE GRAPH", "图谱与检索"],
     ask: ["SOURCE-AWARE QA", "可溯源问答"],
-    evaluation: ["REPLAYABLE QUALITY", "固定题库与评估"],
     reviews: ["HUMAN REVIEW", "Review 队列"],
     settings: ["RUNTIME", "系统设置"],
   };
-  const label = labels[name] || labels.dashboard;
+  const label = labels[name] || labels.documents;
   $("#view-eyebrow").textContent = label[0];
   $("#view-title").textContent = label[1];
   if (name === "documents") loadDocuments();
   if (name === "compilation") loadCompilation();
   if (name === "wiki") loadWiki();
   if (name === "graph") loadGraph();
-  if (name === "evaluation") loadEvaluation();
+  // Regression evaluation stays available via API/CLI, not the reader UI.
   if (name === "reviews") loadReviews();
   if (name === "settings") loadSettings();
   if (name === "ask") renderAskHistory();
@@ -821,9 +820,41 @@ async function replayEvaluation() {
 async function loadSettings() {
   try {
     const value = await api("/api/settings");
-    $("#settings-model").innerHTML = `<div><span>Provider</span><strong>${escapeHTML(value.llm.provider)}</strong></div><div><span>Model</span><strong>${escapeHTML(value.llm.model)}</strong></div><div><span>API 地址</span><code>${escapeHTML(value.llm.base_url)}</code></div><div><span>密钥</span><strong>${value.llm.configured ? "已配置（已脱敏）" : "未配置"}</strong></div>`;
-    $("#settings-retrieval").innerHTML = `<div><span>Top K</span><strong>${value.retrieval.top_k}</strong></div><div><span>图关系扩展</span><strong>${value.retrieval.graph_expansion ? "开启" : "关闭"}</strong></div><div><span>向量检索</span><strong>${value.retrieval.vector_enabled ? "开启" : "关闭"}</strong></div><div><span>上下文预算</span><strong>${value.retrieval.max_context_chars} 字符</strong></div><div><span>Wiki 输出语言</span><strong>${value.wiki?.language === "zh-CN" ? "简体中文优先" : "English"}</strong></div><div><span>原文与英文术语</span><strong>保留</strong></div>`;
+    const configured = Boolean(value.credentials?.configured || value.llm?.configured);
+    $("#settings-model").innerHTML = `<div><span>提供方</span><strong>${escapeHTML(value.llm.provider)}</strong></div><div><span>当前模型</span><strong>${escapeHTML(value.llm.model)}</strong></div><div><span>连接状态</span><strong>${configured ? "已配置密钥" : "未配置密钥"}</strong></div><div><span>本机保存</span><strong>${value.credentials?.stored_locally ? "已保存（不显示密钥）" : "无本地凭据文件"}</strong></div>`;
+    $("#settings-retrieval").innerHTML = `<div><span>知识语言</span><strong>${value.wiki?.language === "zh-CN" ? "中文优先 · 英文原文保留" : "English"}</strong></div><div><span>索引</span><strong>SQLite FTS5</strong></div><div><span>可选向量检索</span><strong>${value.retrieval.vector_enabled ? "开启" : "关闭"}</strong></div>`;
   } catch (error) { toast(`设置读取失败：${error.message}`); }
+}
+
+async function saveDeepSeekKey(event) {
+  event.preventDefault();
+  const input = $("#deepseek-key");
+  const control = $("#save-model-key");
+  const result = $("#test-model-result");
+  control.disabled = true;
+  result.textContent = "正在保存本地密钥…";
+  try {
+    await api("/api/settings/deepseek-key", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-RW-Config-Action": "1"},
+      body: JSON.stringify({api_key: input.value.trim()}),
+    });
+    input.value = "";
+    result.textContent = "已保存在本机。可点击“测试连接”验证有效性。";
+    await Promise.all([loadSettings(), loadHealth()]);
+  } catch (error) { result.textContent = `保存失败：${error.message}`; }
+  finally { control.disabled = false; }
+}
+
+async function clearDeepSeekKey() {
+  if (!window.confirm("确定删除这台电脑上保存的 DeepSeek Key 吗？这不会在 DeepSeek 平台撤销该密钥。")) return;
+  const result = $("#test-model-result");
+  try {
+    await api("/api/settings/deepseek-key", {method: "DELETE", headers: {"X-RW-Config-Action": "1"}});
+    $("#deepseek-key").value = "";
+    result.textContent = "本地密钥已清除。如果环境变量中仍有 Key，模型仍可能已配置。";
+    await Promise.all([loadSettings(), loadHealth()]);
+  } catch (error) { result.textContent = `删除失败：${error.message}`; }
 }
 
 async function testModel() {
@@ -876,12 +907,11 @@ function bindEvents() {
   $("#graph-canvas").addEventListener("pointermove", (event) => { if (!state.graph.dragging) return; state.graph.panX += event.movementX; state.graph.panY += event.movementY; $("#graph-stage")?.setAttribute("transform", graphTransform()); });
   $("#graph-canvas").addEventListener("pointerup", () => { state.graph.dragging = false; });
   $("#graph-canvas").addEventListener("pointercancel", () => { state.graph.dragging = false; });
-  $("#run-baseline").addEventListener("click", () => runEvaluation("baseline"));
-  $("#run-optimized").addEventListener("click", () => runEvaluation("optimized"));
-  $("#run-comparison").addEventListener("click", () => runEvaluation("compare"));
-  $("#replay-evaluation").addEventListener("click", replayEvaluation);
+  // The fixed benchmark remains callable from CLI/API but is not in the UI.
   $("#retrieval-form").addEventListener("submit", searchRetrieval);
   $("#test-model").addEventListener("click", testModel);
+  $("#deepseek-key-form").addEventListener("submit", saveDeepSeekKey);
+  $("#delete-model-key").addEventListener("click", clearDeepSeekKey);
   $("#theme-toggle").addEventListener("click", () => { const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = theme; try { localStorage.setItem("researchwiki.theme", theme); } catch (_) {} });
   $("#file-input").addEventListener("change", () => { $("#drop-label").textContent = $("#file-input").files[0]?.name || "拖入文件，或点击选择"; });
   const zone = $("#drop-zone");
@@ -896,7 +926,7 @@ async function boot() {
   bindEvents();
   await loadHealth();
   await loadOverview();
-  if (location.hash) showView(location.hash.slice(1));
+  showView(location.hash ? location.hash.slice(1) : "documents");
   renderAskHistory();
 }
 
