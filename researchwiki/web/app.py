@@ -597,6 +597,39 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         finally:
             _INGEST_LOCK.release()
 
+    @app.post("/api/wiki/topics/{page_id}/synthesize")
+    def synthesize_wiki_topic(page_id: int) -> Dict[str, Any]:
+        """Optional LLM-only synthesis; never runs during the normal compiler."""
+        from ..extraction.synthesis import synthesize_topic
+        if not LLMClient(config.llm).enabled:
+            raise HTTPException(status_code=409, detail="跨论文深度汇总需要配置模型 API Key")
+        if not _INGEST_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="已有资料导入或知识编译任务正在运行")
+        try:
+            db = Database(config.db_path)
+            try:
+                page = db.get_wiki_page(page_id)
+            finally:
+                db.close()
+            if not page or page.get("type") != "topic":
+                raise HTTPException(status_code=404, detail="未找到研究主题 Wiki 页面")
+            try:
+                summary = synthesize_topic(config, str(page["title"]))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            report = CompilationService(config).run()
+            if report["status"] != "succeeded":
+                raise HTTPException(status_code=409, detail="汇总已缓存，但 Wiki 编译失败，请检查编译诊断")
+            rebuild(config)
+            return {"ok": True, "topic": page["title"],
+                    "claim_count": len(summary["claims"]),
+                    "question_count": len(summary["open_questions"]),
+                    "review_status": summary["review_status"]}
+        finally:
+            _INGEST_LOCK.release()
+
     @app.get("/api/wiki/pages")
     def list_wiki_pages(
         q: str = Query(default="", max_length=200),
