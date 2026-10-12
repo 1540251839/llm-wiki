@@ -35,7 +35,14 @@ def project_research_graph(
 ) -> Dict[str, Any]:
     pages = database.list_wiki_pages(limit=10000)
     page_by_pk = {int(page["id"]): page for page in pages}
-    node_ids = {int(page["id"]): _id(Path(page["path"]).name + "/" + str(page.get("type")) + "/" + str(page["path"])) for page in pages}
+    node_ids = {}
+    for page in pages:
+        path = Path(page["path"])
+        try:
+            portable = path.resolve().relative_to(workspace.resolve()).as_posix()
+        except ValueError:
+            portable = "/".join(path.parts[-3:])
+        node_ids[int(page["id"])] = _id(portable)
     nodes = []
     metadata = {}
     for page in pages:
@@ -105,11 +112,11 @@ def project_research_graph(
     by_node = {item["id"]: item for item in nodes}
     all_edges = edges
     all_nodes = nodes
-    if not center or center not in by_node:
+    global_view = center == "__all__"\n    if not global_view and (not center or center not in by_node):
         paper_nodes = [node for node in nodes if node["type"] == "PAPER"]
         anchor = max(paper_nodes or nodes, key=lambda n: degree[n["id"]], default=None)
         center = anchor["id"] if anchor else ""
-    if center:
+    if center and not global_view:
         allowed = {center}
         frontier = {center}
         depth = max(1, min(2, int(depth)))
@@ -129,8 +136,7 @@ def project_research_graph(
         nodes = [node for node in ordered if node["id"] in selected]
         edges = [edge for edge in all_edges
                  if edge["source"] in selected and edge["target"] in selected]
-    return {
-        "nodes": nodes, "edges": edges,
+    if global_view:\n        nodes = all_nodes[:max(1, min(500, limit))]\n        selected = {node["id"] for node in nodes}\n        edges = [edge for edge in all_edges if edge["source"] in selected and edge["target"] in selected]\n    return {\n        "nodes": nodes, "edges": edges,\n        "stats": {"nodes": len(all_nodes), "edges": len(all_edges)},
         "center": center,
         "all_nodes": len(all_nodes), "all_edges": len(all_edges),
         "visible_nodes": len(nodes),
