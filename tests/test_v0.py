@@ -108,7 +108,7 @@ class ResearchWikiV0Test(unittest.TestCase):
                 "OPENAI_API_KEY": "",
             }, clear=False):
                 with self.assertRaisesRegex(RuntimeError, "LLM is required"):
-                    ingest(config, source)
+                    ingest(config, source, quality_mode="standard")
             import sqlite3
             connection = sqlite3.connect(root / "data" / "researchwiki.db")
             self.assertEqual(connection.execute("select status from papers").fetchone()[0], "FAILED")
