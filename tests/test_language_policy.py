@@ -119,3 +119,43 @@ def test_basic_cache_does_not_invent_a_chinese_translation(tmp_path):
     content = (tmp_path / meta["path"]).read_text(encoding="utf-8")
     assert "暂无中文摘要" in content
     assert paper.abstract in content
+
+
+def test_deep_extraction_writes_chinese_separately_from_english_original():
+    from researchwiki.extraction.paper import enrich_paper
+    from researchwiki.models import ParsedDocument, Page
+
+    class StubLLM:
+        enabled = True
+
+        def structured(self, system, prompt):
+            assert "SIMPLIFIED CHINESE FIRST" in system
+            assert "PAPER TEXT:" in prompt
+            return {
+                "abstract_zh": "本文介绍一种保留英文证据的检索方法。",
+                "research_problem": "研究在噪声下如何检索案例。",
+                "methods": [{
+                    "name": "Evidence Method",
+                    "name_zh": "证据方法",
+                    "description": "一种利用证据进行检索的方法。",
+                    "role": "类案检索",
+                }],
+                "topics": ["Legal case retrieval"],
+                "topic_labels_zh": {"Legal case retrieval": "法律类案检索"},
+            }
+
+    original = "An English Research Paper"
+    abstract = "The paper presents a method for reliable retrieval."
+    text = original + "\nAbstract: " + abstract
+    baseline = StructuredPaper(title=original, abstract=abstract, keywords=["retrieval"])
+    enriched = enrich_paper(
+        ParsedDocument(text=text, pages=[Page(1, text)]),
+        baseline=baseline, llm=StubLLM(), language="zh-CN",
+    )
+    assert enriched.abstract == abstract
+    assert enriched.abstract_zh.startswith("本文介绍")
+    assert enriched.title == original
+    assert enriched.keywords == ["retrieval"]
+    assert enriched.methods[0].name == "Evidence Method"
+    assert enriched.methods[0].name_zh == "证据方法"
+    assert enriched.topic_labels_zh["Legal case retrieval"] == "法律类案检索"
