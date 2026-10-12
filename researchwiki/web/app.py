@@ -336,8 +336,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         quality_mode: str = Form(default="standard"),
     ) -> Dict[str, Any]:
         quality_mode = quality_mode.strip().lower()
-        if quality_mode not in {"standard", "high"}:
-            raise HTTPException(status_code=400, detail="quality_mode must be standard or high")
+        if quality_mode not in {"basic", "standard", "high"}:
+            raise HTTPException(status_code=400, detail="quality_mode must be basic, standard or high")
         filename = _safe_upload_name(file.filename or "document")
         suffix = Path(filename).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
@@ -419,7 +419,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 raise HTTPException(status_code=409, detail="The source file is missing; upload it again")
             previous_job = db.latest_ingest_job(paper_id)
             requested_mode = quality_mode.strip().lower() or str((previous_job or {}).get("quality_mode") or config.quality_mode)
-            if requested_mode not in {"standard", "high"}:
+            if requested_mode not in {"basic", "standard", "high"}:
                 raise HTTPException(status_code=400, detail="quality_mode must be standard or high")
             db.update_paper_status(paper_id, "UPLOADED")
             job = db.retry_ingest_job(int(previous_job["id"]), requested_mode) if previous_job else None
