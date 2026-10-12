@@ -13,7 +13,7 @@ const state = {
   currentAnswer: null,
   compilationBusy: false,
   evaluationRuns: [],
-  graph: { nodes: [], edges: [], visibleTypes: new Set(), scale: 1, panX: 0, panY: 0, dragging: false },
+  graph: { nodes: [], edges: [], visibleTypes: new Set(), scale: 1, panX: 0, panY: 0, dragging: false, center: "", renderer: "svg", g6: null },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -708,38 +708,167 @@ async function submitQuestion(event) {
   }
 }
 
-const graphColors = { PAGE: "#6ea8ff", SOURCE: "#55d6a7", PAGE_TYPE: "#f5bd62", TOPIC: "#9b87f5" };
+const graphColors = {
+  PAPER: "#397fb7", TOPIC: "#8b63b7", METHOD: "#258f84", DATASET: "#d08b3e"
+};
+const graphTypeNames = {PAPER:"论文", TOPIC:"主题", METHOD:"方法", DATASET:"数据集"};
+const graphRelationNames = {
+  STUDIES_TOPIC: "研究主题", REFERENCES_METHOD: "涉及方法",
+  MENTIONS_DATASET: "提及数据集", TESTED_ON: "用于测试",
+  TRAINED_ON: "用于训练", VALIDATED_ON: "用于验证", RELATED: "相关"
+};
 
 function graphTransform() {
   const graph = state.graph;
   return `translate(${graph.panX} ${graph.panY}) translate(500 340) scale(${graph.scale}) translate(-500 -340)`;
 }
 
-function renderGraph() {
-  const svg = $("#graph-canvas");
+function stableHash(value) {
+  let h = 2166136261;
+  for (const char of String(value)) { h ^= char.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function graphPositions(visible, edges) {
   const graph = state.graph;
-  const query = $("#graph-search").value.trim().toLocaleLowerCase();
-  const visible = graph.nodes.filter((node) => graph.visibleTypes.has(node.type));
   const positions = new Map();
-  const groups = [...new Set(visible.map((node) => node.type))].sort();
-  groups.forEach((type, groupIndex) => {
-    const items = visible.filter((node) => node.type === type);
-    const radius = 105 + groupIndex * 95;
-    items.forEach((node, index) => {
-      const angle = (Math.PI * 2 * index / Math.max(1, items.length)) - Math.PI / 2 + groupIndex * .3;
-      positions.set(node.id, { x: 500 + Math.cos(angle) * radius, y: 340 + Math.sin(angle) * radius });
+  visible.forEach((node, index) => {
+    const seed = stableHash(node.id);
+    const angle = ((seed % 997) / 997) * Math.PI * 2;
+    const radius = 110 + (Math.floor(seed / 997) % 180);
+    positions.set(node.id, {x: 500 + Math.cos(angle) * radius, y: 340 + Math.sin(angle) * radius});
+  });
+  if (graph.center && positions.has(graph.center)) positions.set(graph.center, {x:500,y:340});
+  const width = 950, height = 630;
+  for (let step = 0; step < 64; step++) {
+    const forces = new Map(visible.map(node => [node.id, {x:0,y:0}]));
+    for (let i = 0; i < visible.length; i++) {
+      const a = positions.get(visible[i].id);
+      for (let j = i + 1; j < visible.length; j++) {
+        const b = positions.get(visible[j].id);
+        const dx = a.x-b.x, dy = a.y-b.y, d2 = dx*dx+dy*dy+120;
+        const force = Math.min(28, 14000/d2);
+        const len = Math.sqrt(d2);
+        forces.get(visible[i].id).x += dx/len*force;
+        forces.get(visible[i].id).y += dy/len*force;
+        forces.get(visible[j].id).x -= dx/len*force;
+        forces.get(visible[j].id).y -= dy/len*force;
+      }
+    }
+    for (const edge of edges) {
+      const u = positions.get(edge.source),v = positions.get(edge.target);
+      if (!u || !v) continue;
+      const dx=v.x-u.x, dy=v.y-u.y, distance=Math.hypot(dx,dy)||1;
+      const force=(distance-155)*0.014;
+      forces.get(edge.source).x += dx/distance*force;
+      forces.get(edge.source).y += dy/distance*force;
+      forces.get(edge.target).x -= dx/distance*force;
+      forces.get(edge.target).y -= dy/distance*force;
+    }
+    visible.forEach(node => {
+      if (node.id === graph.center) return;
+      const p=positions.get(node.id), f=forces.get(node.id);
+      p.x=Math.min(width,Math.max(45,p.x+Math.max(-18,Math.min(18,f.x+(500-p.x)*0.004))));
+      p.y=Math.min(height,Math.max(42,p.y+Math.max(-18,Math.min(18,f.y+(340-p.y)*0.004))));
     });
+  }
+  return positions;
+}
+
+function visibleResearchGraph() {
+  const graph=state.graph;
+  const nodes=graph.nodes.filter(n=>graph.visibleTypes.has(n.type));
+  const ids=new Set(nodes.map(n=>n.id));
+  const kind=$("#graph-edge-filter").value;
+  const edges=graph.edges.filter(e=>ids.has(e.source)&&ids.has(e.target)&&(!kind||e.semantic===kind));
+  return {nodes,edges};
+}
+
+function renderGraph() {
+  const graph=state.graph;
+  const {nodes,edges}=visibleResearchGraph();
+  const query=$("#graph-search").value.trim().toLocaleLowerCase();
+  $("#graph-visible-count").textContent=`${nodes.length} 个科研对象 · ${edges.length} 条关系`;
+  if (graph.renderer === "g6" && window.G6?.Graph) {
+    renderG6ResearchGraph(nodes,edges);
+    return;
+  }
+  $("#graph-canvas").classList.remove("hidden");
+  $("#graph-g6").classList.add("hidden");
+  const svg=$("#graph-canvas");
+  const positions=graphPositions(nodes,edges);
+  const edgeMarkup=edges.map(edge=>{
+    const a=positions.get(edge.source),b=positions.get(edge.target);
+    return `<line class="graph-edge" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}">
+      <title>${escapeHTML(graphRelationNames[edge.semantic]||edge.semantic)}</title></line>`;
+  }).join("");
+  const nodeMarkup=nodes.map(node=>{
+    const p=positions.get(node.id),match=!query||node.name.toLowerCase().includes(query);
+    const selected=graph.selectedId===node.id;
+    return `<g class="graph-node ${match?"match":"dim"} ${selected?"selected":""}"
+      data-graph-node="${escapeHTML(node.id)}" role="button" tabindex="0"
+      aria-label="${escapeHTML((graphTypeNames[node.type]||node.type)+" "+node.name)}"
+      transform="translate(${p.x} ${p.y})"><circle r="${selected?13:10}"
+      fill="${graphColors[node.type]||"#778899"}"/>
+      <text y="27" text-anchor="middle">${escapeHTML(node.name.slice(0,20))}</text>
+      <title>${escapeHTML(node.name)}</title></g>`;
+  }).join("");
+  svg.innerHTML=nodes.length?`<g id="graph-stage" transform="${graphTransform()}">${edgeMarkup}${nodeMarkup}</g>`
+    : '<text x="500" y="340" text-anchor="middle" fill="currentColor">尚无科研关系，请先导入并编译论文</text>';
+  $$('[data-graph-node]',svg).forEach(node=>{
+    node.addEventListener("click",()=>selectGraphNode(node.dataset.graphNode));
+    node.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();selectGraphNode(node.dataset.graphNode);}});
   });
-  const relation = $("#graph-edge-filter").value;
-  const edges = graph.edges.filter((edge) => positions.has(edge.source) && positions.has(edge.target) && (!relation || edge.semantic === relation));
-  $("#graph-visible-count").textContent = `${visible.length} 个可见节点 · ${edges.length} 条关系${query ? ` · ${visible.filter((node) => node.name.toLocaleLowerCase().includes(query)).length} 个匹配` : ""}`;
-  const edgeMarkup = edges.map((edge) => { const a = positions.get(edge.source); const b = positions.get(edge.target); return `<line class="graph-edge" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" data-semantic="${escapeHTML(edge.semantic)}" />`; }).join("");
-  const nodeMarkup = visible.map((node) => { const p = positions.get(node.id); const match = !query || node.name.toLocaleLowerCase().includes(query); const radius = node.type === "PAGE" ? 8 : 6; return `<g class="graph-node ${match ? "match" : "dim"}" data-graph-node="${escapeHTML(node.id)}" role="button" tabindex="0" aria-label="${escapeHTML(node.type + " " + node.name)}" transform="translate(${p.x} ${p.y})"><circle r="${radius}" fill="${graphColors[node.type] || graphColors.TOPIC}"/><text y="${radius + 13}" text-anchor="middle">${escapeHTML(node.name.slice(0, 24))}</text></g>`; }).join("");
-  svg.innerHTML = visible.length ? `<g id="graph-stage" transform="${graphTransform()}">${edgeMarkup}${nodeMarkup}</g>` : '<text x="500" y="340" text-anchor="middle" fill="currentColor">暂无可见节点，请先编译知识或调整筛选</text>';
-  $$('[data-graph-node]', svg).forEach((node) => {
-    node.addEventListener("click", () => selectGraphNode(node.dataset.graphNode));
-    node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectGraphNode(node.dataset.graphNode); } });
-  });
+}
+
+function renderG6ResearchGraph(nodes,edges) {
+  const graph=state.graph;
+  const host=$("#graph-g6");
+  $("#graph-canvas").classList.add("hidden");
+  host.classList.remove("hidden");
+  if (graph.g6) { graph.g6.destroy(); graph.g6=null; }
+  try {
+    const instance=new window.G6.Graph({
+      container:host,
+      autoFit:"view",
+      data:{
+        nodes:nodes.map(n=>({id:n.id,style:{size:26,fill:graphColors[n.type],
+          labelText:n.name.length>22?n.name.slice(0,21)+"…":n.name,
+          labelPlacement:"bottom",labelFontSize:11}})),
+        edges:edges.map(e=>({id:e.id,source:e.source,target:e.target,
+          style:{stroke:"#98a6b5",lineWidth:1.1}}))
+      },
+      layout:{type:"d3-force",animation:false,manyBody:{strength:-250},
+        link:{distance:145},x:{},y:{}},
+      behaviors:["drag-canvas","zoom-canvas","drag-element"],
+    });
+    graph.g6=instance;
+    instance.on("node:click",(ev)=>{const id=ev.target?.id||ev.item?.id;if(id)selectGraphNode(id);});
+    const result=instance.render();
+    if(result?.catch)result.catch(()=>{graph.renderer="svg";renderGraph();toast("G6 渲染失败，已切换本地图谱");});
+  } catch(error) {
+    graph.renderer="svg";
+    toast("G6 不可用，已切换本地图谱");
+    renderGraph();
+  }
+}
+
+async function enableG6ResearchGraph() {
+  if (!window.G6?.Graph) {
+    const btn=$("#graph-enable-g6");btn.disabled=true;btn.textContent="正在加载 G6…";
+    try {
+      await new Promise((resolve,reject)=>{
+        const tag=document.createElement("script");
+        tag.src="https://cdn.jsdelivr.net/npm/@antv/g6@5/dist/g6.min.js";
+        tag.async=true;tag.onload=resolve;tag.onerror=reject;
+        document.head.appendChild(tag);
+      });
+    } catch { toast("无法加载 G6，仍可使用本地布局");btn.disabled=false;btn.textContent="G6 力导向（可选）";return; }
+    btn.disabled=false;btn.textContent="G6 力导向";
+  }
+  state.graph.renderer=state.graph.renderer==="g6"?"svg":"g6";
+  $("#graph-enable-g6").textContent=state.graph.renderer==="g6"?"本地布局":"G6 力导向";
+  renderGraph();
 }
 
 async function selectGraphNode(id) {
