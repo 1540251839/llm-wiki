@@ -542,9 +542,25 @@ def do_answer_events(config: Config, question: str, top_k: Optional[int] = None)
                              context_config={**config.retrieval, "top_k": top_k or config.top_k})
 
 
-def parse_only(config: Config, source: Union[str, Path], llm_client: Optional[LLMClient] = None) -> StructuredPaper:
-    document = parse_file(Path(source).expanduser())
-    return extract_paper(document, llm_client or LLMClient(config.llm))
+def parse_only(
+    config: Config,
+    source: Union[str, Path],
+    llm_client: Optional[LLMClient] = None,
+    mode: str = "basic",
+) -> StructuredPaper:
+    path = Path(source).expanduser().resolve()
+    document = parse_file(path)
+    base = extract_basic(document, source_path=path, workspace_root=config.root)
+    if mode == "basic":
+        return base
+    if mode not in {"standard", "high"}:
+        raise ValueError("mode must be basic, standard or high")
+    client = llm_client or LLMClient(config.llm)
+    analysis = analyze_paper(document, client, purpose=_purpose(config)) if mode == "high" else ""
+    return enrich_paper(
+        document, base, client, analysis=analysis,
+        purpose=_purpose(config), quality_mode=mode,
+    )
 
 
 def _log(config: Config, data: Dict[str, Any]) -> None:
