@@ -872,37 +872,71 @@ async function enableG6ResearchGraph() {
 }
 
 async function selectGraphNode(id) {
-  const node = state.graph.nodes.find((item) => item.id === id);
+  const graph=state.graph;
+  const node=graph.nodes.find(item=>item.id===id);
   if (!node) return;
-  const connections = state.graph.edges.filter((edge) => edge.source === id || edge.target === id);
-  state.graph.selectedId = id;
-  $$('[data-graph-node]').forEach((element) => element.classList.toggle("selected", element.dataset.graphNode === id));
-  const sourceId = node.source_id || (node.type === "SOURCE" ? node.id.replace(/^source:/, "") : "");
-  $("#graph-detail").innerHTML = `<p class="eyebrow">${escapeHTML(node.type)}</p><h3>${escapeHTML(node.name)}</h3><div class="settings-list"><div><span>稳定 ID</span><code>${escapeHTML(node.id)}</code></div><div><span>连接数</span><strong>${connections.length}</strong></div><div><span>来源定位</span><strong>${node.page_number ? `第 ${node.page_number} 页 · ${node.char_start}-${node.char_end}` : "元数据对象"}</strong></div><div><span>证据类型</span><strong>${escapeHTML(node.confidence || "metadata")}</strong></div></div>${node.page_id ? `<button class="primary" data-open-graph-page="${node.page_id}">打开 Wiki 页面</button>` : ""}${sourceId ? `<button class="secondary" data-graph-source="${escapeHTML(sourceId)}">查看来源资料</button>` : ""}<div id="graph-node-evidence"></div><div class="detail-section"><h3>关系</h3>${connections.slice(0, 24).map((edge) => { const peer = edge.source === id ? edge.target : edge.source; const other = state.graph.nodes.find((item) => item.id === peer); return `<button class="graph-connection" data-connected-node="${escapeHTML(peer)}"><code>${escapeHTML(edge.semantic)}</code><span>${edge.source === id ? "→" : "←"} ${escapeHTML(other?.name || peer)}</span></button>`; }).join("") || "<p>无连接</p>"}</div>`;
-  $('[data-open-graph-page]')?.addEventListener("click", () => goToWikiPage(node.page_id, node.name));
-  $('[data-graph-source]')?.addEventListener("click", () => openDocument(sourceId));
-  $$('[data-connected-node]').forEach((button) => button.addEventListener("click", () => selectGraphNode(button.dataset.connectedNode)));
+  graph.selectedId=id;
+  const connections=graph.edges.filter(edge=>edge.source===id||edge.target===id);
+  if (graph.renderer==="svg") renderGraph();
+  $("#graph-detail").innerHTML=`<p class="eyebrow">${escapeHTML(graphTypeNames[node.type]||node.type)}</p>
+    <h3>${escapeHTML(node.name)}</h3>
+    <p class="muted">与 ${connections.length} 个知识关系相连。点击可展开更多关联。</p>
+    <div class="settings-actions">
+      <button class="primary" id="graph-expand-node">展开一跳关系</button>
+      ${node.page_id?`<button class="secondary" data-open-graph-page="${node.page_id}">阅读 Wiki</button>`:""}
+    </div>
+    <div class="detail-section"><h3>关联对象</h3>
+      ${connections.slice(0,30).map(edge=>{
+        const peer=edge.source===id?edge.target:edge.source;
+        const linked=graph.nodes.find(item=>item.id===peer);
+        const type=graphRelationNames[edge.semantic]||edge.semantic;
+        return `<button class="graph-connection" data-connected-node="${escapeHTML(peer)}">
+          <code>${escapeHTML(type)}</code>
+          <span>${escapeHTML(linked?.name||peer)}</span></button>`;
+      }).join("")||"<p>当前视图没有关联对象。</p>"}
+    </div>
+    <details class="advanced-details" id="graph-node-evidence"><summary>原始证据与定位</summary>
+      <p class="muted">打开后查看原始论文页码和摘录。</p></details>`;
+  $("#graph-expand-node")?.addEventListener("click",()=>loadGraph(id));
+  $('[data-open-graph-page]')?.addEventListener("click",()=>goToWikiPage(node.page_id,node.original_name||node.name));
+  $$('[data-connected-node]').forEach(button=>button.addEventListener("click",()=>selectGraphNode(button.dataset.connectedNode)));
   if (node.page_id) {
-    try { const page = await api(`/api/wiki/pages/${node.page_id}`); if (state.graph.selectedId === id) $("#graph-node-evidence").innerHTML = `<div class="detail-section"><h3>来源证据</h3>${(page.sources || []).map(evidenceMarkup).join("") || '<p class="muted">暂无来源证据</p>'}</div>`; }
-    catch (error) { if (state.graph.selectedId === id) $("#graph-node-evidence").textContent = `证据加载失败：${error.message}`; }
+    try {
+      const page=await api(`/api/wiki/pages/${node.page_id}`);
+      if (graph.selectedId===id)$("#graph-node-evidence").innerHTML=
+        `<summary>原始证据与定位</summary>${(page.sources||[]).map(evidenceMarkup).join("")||'<p class="muted">尚无来源证据。</p>'}`;
+    } catch { /* The graph remains useful if source preview cannot load. */ }
   }
 }
 
-async function loadGraph() {
-  const svg = $("#graph-canvas");
-  svg.innerHTML = `<text x="500" y="340" text-anchor="middle" fill="#8d98ad">正在读取图谱…</text>`;
+async function loadGraph(center = "") {
+  const svg=$("#graph-canvas");
+  if(graph.renderer!=="g6")svg.innerHTML='<text x="500" y="340" text-anchor="middle" fill="currentColor">正在读取科研关系…</text>';
   try {
-    const value = await api("/api/graph?limit=2000");
-    state.graph.nodes = value.nodes || [];
-    state.graph.edges = value.edges || [];
-    state.graph.visibleTypes = new Set(state.graph.nodes.map((node) => node.type));
-    $("#graph-edge-filter").innerHTML = '<option value="">全部关系</option>' + [...new Set(state.graph.edges.map((edge) => edge.semantic))].sort().map((semantic) => `<option value="${escapeHTML(semantic)}">${escapeHTML(semantic)}</option>`).join("");
-    const types = Object.entries(value.node_types || {});
-    $("#graph-type-filters").innerHTML = types.map(([type, count]) => `<label><input type="checkbox" data-graph-type="${escapeHTML(type)}" checked />${escapeHTML(type)} <small>${count}</small></label>`).join("");
-    $$('[data-graph-type]').forEach((input) => input.addEventListener("change", () => { input.checked ? state.graph.visibleTypes.add(input.dataset.graphType) : state.graph.visibleTypes.delete(input.dataset.graphType); renderGraph(); }));
-    $("#graph-stats").innerHTML = [renderMetric("NODE", value.stats.nodes, "稳定节点"), renderMetric("EDGE", value.stats.edges, "有效关系"), renderMetric("HASH", String(value.digest || "").slice(0, 10), "确定性产物"), renderMetric("MODE", "LOCAL", "本地规则抽取")].join("");
-    renderGraph();
-  } catch (error) { svg.innerHTML = `<text x="500" y="340" text-anchor="middle" fill="#ff7d8b">${escapeHTML(error.message)}</text>`; }
+    const value=await api(`/api/graph/research?center=${encodeURIComponent(center)}&depth=1&limit=220`);
+    state.graph.nodes=value.nodes||[];
+    state.graph.edges=value.edges||[];
+    state.graph.center=value.center||"";
+    state.graph.visibleTypes=new Set(state.graph.nodes.map(node=>node.type));
+    const semantics=[...new Set(state.graph.edges.map(edge=>edge.semantic))].sort();
+    $("#graph-edge-filter").innerHTML='<option value="">全部关系</option>'+
+      semantics.map(key=>`<option value="${escapeHTML(key)}">${escapeHTML(graphRelationNames[key]||key)}</option>`).join("");
+    const types=Object.entries(value.node_types||{});
+    $("#graph-type-filters").innerHTML=types.map(([type,count])=>
+      `<label><input type="checkbox" data-graph-type="${escapeHTML(type)}" checked />${escapeHTML(graphTypeNames[type]||type)} <small>${count}</small></label>`).join("");
+    $$('[data-graph-type]').forEach(input=>input.addEventListener("change",()=>{
+      input.checked?state.graph.visibleTypes.add(input.dataset.graphType):state.graph.visibleTypes.delete(input.dataset.graphType);
+      renderGraph();
+    }));
+    $("#graph-stats").innerHTML=[
+      renderMetric("OBJECTS",value.stats?.nodes??0,"知识对象总数"),
+      renderMetric("LINKS",value.stats?.edges??0,"科研对象关系"),
+      renderMetric("VISIBLE",value.nodes?.length??0,"当前视图"),
+      renderMetric("VIEW",center==="__all__"?"GLOBAL":"LOCAL","关系范围"),
+    ].join("");
+    if (!center && state.graph.nodes.length) selectGraphNode(state.graph.center);
+    else renderGraph();
+  } catch(error) {svg.innerHTML=`<text x="500" y="340" text-anchor="middle" fill="currentColor">${escapeHTML(error.message)}</text>`;}
 }
 
 async function searchRetrieval(event) {
@@ -1075,11 +1109,13 @@ function bindEvents() {
   $$('[data-question]').forEach((button) => button.addEventListener("click", () => { $("#ask-input").value = button.dataset.question; $("#ask-input").focus(); }));
   $("#refresh-reviews").addEventListener("click", loadReviews);
   $("#graph-search").addEventListener("input", renderGraph);
+  $("#graph-global").addEventListener("click",()=>loadGraph("__all__"));
+  $("#graph-enable-g6").addEventListener("click",enableG6ResearchGraph);
   $("#graph-edge-filter").addEventListener("change", renderGraph);
   $("#graph-extract").addEventListener("click", reextractGraph);
-  $("#graph-zoom-in").addEventListener("click", () => { state.graph.scale = Math.min(2.4, state.graph.scale * 1.18); renderGraph(); });
-  $("#graph-zoom-out").addEventListener("click", () => { state.graph.scale = Math.max(.45, state.graph.scale / 1.18); renderGraph(); });
-  $("#graph-reset").addEventListener("click", () => { state.graph.scale = 1; state.graph.panX = 0; state.graph.panY = 0; renderGraph(); });
+  $("#graph-zoom-in").addEventListener("click", () => { if(state.graph.g6&&state.graph.renderer==="g6")state.graph.g6.zoomBy?.(1.18);else{state.graph.scale=Math.min(2.4,state.graph.scale*1.18);renderGraph();} });
+  $("#graph-zoom-out").addEventListener("click", () => { if(state.graph.g6&&state.graph.renderer==="g6")state.graph.g6.zoomBy?.(.85);else{state.graph.scale=Math.max(.45,state.graph.scale/1.18);renderGraph();} });
+  $("#graph-reset").addEventListener("click", () => { if(state.graph.g6&&state.graph.renderer==="g6")state.graph.g6.fitView?.();else{state.graph.scale=1;state.graph.panX=0;state.graph.panY=0;renderGraph();} });
   $("#graph-canvas").addEventListener("wheel", (event) => { event.preventDefault(); state.graph.scale = Math.max(.45, Math.min(2.4, state.graph.scale * (event.deltaY < 0 ? 1.1 : .9))); renderGraph(); }, { passive: false });
   $("#graph-canvas").addEventListener("pointerdown", (event) => { if (event.target.closest?.('[data-graph-node]')) return; state.graph.dragging = true; event.currentTarget.setPointerCapture?.(event.pointerId); });
   $("#graph-canvas").addEventListener("pointermove", (event) => { if (!state.graph.dragging) return; state.graph.panX += event.movementX; state.graph.panY += event.movementY; $("#graph-stage")?.setAttribute("transform", graphTransform()); });
