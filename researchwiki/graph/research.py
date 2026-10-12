@@ -112,7 +112,8 @@ def project_research_graph(
     by_node = {item["id"]: item for item in nodes}
     all_edges = edges
     all_nodes = nodes
-    global_view = center == "__all__"\n    if not global_view and (not center or center not in by_node):
+    global_view = center == "__all__"
+    if not global_view and (not center or center not in by_node):
         paper_nodes = [node for node in nodes if node["type"] == "PAPER"]
         anchor = max(paper_nodes or nodes, key=lambda n: degree[n["id"]], default=None)
         center = anchor["id"] if anchor else ""
@@ -136,7 +137,13 @@ def project_research_graph(
         nodes = [node for node in ordered if node["id"] in selected]
         edges = [edge for edge in all_edges
                  if edge["source"] in selected and edge["target"] in selected]
-    if global_view:\n        nodes = all_nodes[:max(1, min(500, limit))]\n        selected = {node["id"] for node in nodes}\n        edges = [edge for edge in all_edges if edge["source"] in selected and edge["target"] in selected]\n    return {\n        "nodes": nodes, "edges": edges,\n        "stats": {"nodes": len(all_nodes), "edges": len(all_edges)},
+    if global_view:
+        nodes = all_nodes[:max(1, min(500, limit))]
+        selected = {node["id"] for node in nodes}
+        edges = [edge for edge in all_edges if edge["source"] in selected and edge["target"] in selected]
+    return {
+        "nodes": nodes, "edges": edges,
+        "stats": {"nodes": len(all_nodes), "edges": len(all_edges)},
         "center": center,
         "all_nodes": len(all_nodes), "all_edges": len(all_edges),
         "visible_nodes": len(nodes),
