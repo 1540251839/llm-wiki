@@ -239,12 +239,13 @@ async function openDocument(id) {
       ${reviews.length ? `<div class="detail-section"><h3>待审核</h3><div class="review-list">${reviews.map((review) => `<div class="review-item"><div><span class="badge ${review.severity === "error" ? "error" : "warning"}">${escapeHTML(review.kind)}</span><p>${escapeHTML(review.message)}</p></div><button class="row-action" data-resolve-review="${review.id}">标为已处理</button></div>`).join("")}</div></div>` : ""}
       <div class="dialog-actions">
         ${item.raw_name ? `<a class="secondary" target="_blank" rel="noopener" href="/api/documents/${encodeURIComponent(item.id)}/file">查看原始资料 ↗</a>` : ""}
-        ${item.status === "INDEXED" && extraction.extraction_mode === "basic" && state.modelConfigured && !["PENDING", "RUNNING"].includes(job.status) ? '<button class="primary" id="enrich-document">使用模型深度分析</button>' : ""}
+        ${item.status === "INDEXED" && state.modelConfigured && !["PENDING", "RUNNING"].includes(job.status) ? `<button class="primary" id="enrich-document">${extraction.extraction_mode === "basic" ? "使用模型深度分析" : "重新生成中文解读"}</button>` : ""}
         <button class="danger" id="delete-document">移到回收区</button>
         ${item.retryable ? `<button class="secondary" id="retry-document-high">高质量重试</button><button class="primary" id="retry-document">标准重试</button>` : ""}
       </div>`;
     $$('[data-related-page]', root).forEach((button) => button.addEventListener("click", () => goToWikiPage(button.dataset.relatedPage, button.dataset.relatedTitle)));
     $("#enrich-document")?.addEventListener("click", async () => {
+      if (!window.confirm("将调用模型更新自动生成的知识内容；原始英文和人工笔记会保留。继续吗？")) return;
       try {
         await api(`/api/documents/${encodeURIComponent(id)}/enrich?quality_mode=standard`, { method: "POST" });
         toast("已加入深度分析队列");
