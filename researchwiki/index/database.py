@@ -198,9 +198,15 @@ class Database:
             ("evidence_text", "TEXT"),
             ("char_start", "INTEGER"),
             ("char_end", "INTEGER"),
+            ("paragraph", "INTEGER"),
+            ("confidence", "TEXT"),
         ):
             if name not in page_source_columns:
                 self.conn.execute("ALTER TABLE page_sources ADD COLUMN " + name + " " + kind)
+        edge_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(graph_edges)")}
+        for name, kind in (("locator", "TEXT"), ("char_start", "INTEGER"), ("char_end", "INTEGER"), ("confidence", "TEXT")):
+            if name not in edge_columns:
+                self.conn.execute("ALTER TABLE graph_edges ADD COLUMN " + name + " " + kind)
         self.conn.execute(
             """INSERT OR IGNORE INTO sources(
                    id,sha256,original_name,original_path,raw_path,media_type,size_bytes,created_at,updated_at
@@ -514,7 +520,9 @@ class Database:
                SET status='FAILED',
                    error_message='PROCESS_INTERRUPTED: the previous Web process stopped before ingestion completed; retry this document.',
                    updated_at=datetime('now')
-               WHERE status IN (?,?,?,?)""",
+               WHERE status IN (?,?,?,?) AND NOT EXISTS (
+                 SELECT 1 FROM ingest_jobs j WHERE j.source_id=papers.id AND j.status='PENDING'
+               )""",
             statuses,
         )
         self.conn.commit()
@@ -526,6 +534,7 @@ class Database:
         status: str = "",
         page: int = 1,
         page_size: int = 20,
+        file_type: str = "",
     ) -> Dict[str, Any]:
         clauses: List[str] = []
         params: List[Any] = []
@@ -538,11 +547,16 @@ class Database:
             params.append(status.strip().upper())
         else:
             clauses.append("status <> 'DELETED'")
+        if file_type.strip():
+            suffix = file_type.strip().lower().lstrip(".")
+            suffixes = ("md", "markdown") if suffix in {"md", "markdown"} else (suffix,)
+            clauses.append("(" + " OR ".join("lower(COALESCE(NULLIF(raw_path,''),source_path)) LIKE ?" for _ in suffixes) + ")")
+            params.extend("%." + value for value in suffixes)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         total = int(self.conn.execute("SELECT count(*) FROM papers" + where, params).fetchone()[0])
         offset = max(0, page - 1) * page_size
         rows = self.conn.execute(
-            "SELECT * FROM papers" + where + " ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM papers" + where + " ORDER BY updated_at DESC, created_at DESC, id LIMIT ? OFFSET ?",
             [*params, page_size, offset],
         ).fetchall()
         return {"items": [self._paper_dict(row) for row in rows], "total": total, "page": page, "page_size": page_size}
@@ -613,7 +627,7 @@ class Database:
     def get_page_sources(self, page_id: int) -> List[Dict[str, Any]]:
         rows = self.conn.execute(
             """SELECT ps.source_id,ps.source_path,ps.locator,ps.page_number,
-                      ps.section,ps.evidence_text,ps.char_start,ps.char_end,
+                      ps.section,ps.evidence_text,ps.char_start,ps.char_end,ps.paragraph,ps.confidence,
                       s.original_name,s.raw_path,s.sha256
                FROM page_sources ps LEFT JOIN sources s ON s.id=ps.source_id
                WHERE ps.page_id=? ORDER BY s.original_name,ps.source_id""",
@@ -679,14 +693,16 @@ class Database:
             paragraph_end = text.find("\n\n", match_start)
             if paragraph_end < 0 or paragraph_end - paragraph_start > 900:
                 paragraph_end = min(len(text), max(match_start + max(len(title), 1), paragraph_start + 650))
-            evidence = " ".join(text[paragraph_start:paragraph_end].split())[:700]
-            char_end = min(len(text), max(match_start + max(len(title), 1), paragraph_start + len(evidence)))
+            char_end = min(len(text), paragraph_end, paragraph_start + 700)
+            evidence = text[paragraph_start:char_end]
             locator = f"page:{page_number}#chars={paragraph_start}-{char_end}"
             section = title if exact else "source excerpt (fallback)"
             self.conn.execute(
                 """UPDATE page_sources SET locator=?,page_number=?,section=?,evidence_text=?,
-                     char_start=?,char_end=? WHERE page_id=? AND source_id=?""",
-                (locator, page_number, section, evidence, paragraph_start, char_end, int(row["id"]), source_id),
+                     char_start=?,char_end=?,paragraph=?,confidence=? WHERE page_id=? AND source_id=?""",
+                (locator, page_number, section, evidence, paragraph_start, char_end,
+                 len(re.findall(r"\n\s*\n", text[:paragraph_start])) + 1,
+                 "exact_text" if exact else "source_excerpt_fallback", int(row["id"]), source_id),
             )
             updated += 1
         self.conn.commit()
@@ -809,12 +825,14 @@ class Database:
                     raise ValueError("graph self-loop is not allowed: " + str(edge["id"]))
                 self.conn.execute(
                     """INSERT INTO graph_edges(
-                         id,source,target,relation,semantic,doc_id,page_number,evidence,created_at
-                       ) VALUES(?,?,?,?,?,?,?,?,datetime('now'))""",
+                         id,source,target,relation,semantic,doc_id,page_number,evidence,locator,char_start,char_end,confidence,created_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))""",
                     (
                         edge["id"], edge["source"], edge["target"], edge["relation"],
                         edge["semantic"], edge.get("doc_id", ""), int(edge.get("page_number") or 0),
                         edge.get("evidence", ""),
+                        edge.get("locator", ""), int(edge.get("char_start") or 0),
+                        int(edge.get("char_end") or 0), edge.get("confidence", "metadata_exact"),
                     ),
                 )
             self.conn.execute(

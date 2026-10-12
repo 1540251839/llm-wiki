@@ -33,9 +33,12 @@ def _parser() -> argparse.ArgumentParser:
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--top-k", type=int, default=None)
     sub.add_parser("build", help="rebuild the Wiki index and page links")
+    compile_cmd = sub.add_parser("compile", help="compile cached paper extractions into traceable Wiki pages")
+    compile_cmd.add_argument("--dry-run", action="store_true", help="inspect inputs and planned changes without writing")
     sub.add_parser("graph", help="rebuild the deterministic graph contract")
     eval_cmd = sub.add_parser("eval", help="run the fixed replayable QA evaluation")
     eval_cmd.add_argument("--profile", choices=("baseline", "optimized"), default="optimized")
+    eval_cmd.add_argument("--compare", action="store_true", help="run both profiles against one frozen corpus")
     jobs_cmd = sub.add_parser("jobs", help="list persistent ingestion jobs")
     jobs_cmd.add_argument("--status", default="")
     reviews_cmd = sub.add_parser("reviews", help="list open quality reviews")
@@ -82,14 +85,25 @@ def main(argv: Any = None) -> None:
         elif args.command == "build":
             stats = rebuild(config)
             print(f"Built index: {stats['pages']} pages, {stats['links']} links, {stats['stale']} stale pages removed")
+        elif args.command == "compile":
+            from .compilation import CompilationService
+            service = CompilationService(config)
+            report = service.inventory() if args.dry_run else service.run()
+            if not args.dry_run and report.get("status") == "succeeded":
+                report["index"] = rebuild(config)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            if report.get("status") in {"failed", "blocked"}:
+                raise SystemExit(1)
         elif args.command == "graph":
             database = Database(config.db_path)
             try:
-                print(json.dumps(extract_graph(database), ensure_ascii=False, indent=2))
+                print(json.dumps(extract_graph(database, wiki_root=config.wiki_root), ensure_ascii=False, indent=2))
             finally:
                 database.close()
         elif args.command == "eval":
-            print(json.dumps(run_evaluation(config, profile=args.profile), ensure_ascii=False, indent=2))
+            from .evaluation.runner import compare_profiles
+            value = compare_profiles(config) if args.compare else run_evaluation(config, profile=args.profile)
+            print(json.dumps(value, ensure_ascii=False, indent=2))
         elif args.command == "jobs":
             database = Database(config.db_path)
             try:

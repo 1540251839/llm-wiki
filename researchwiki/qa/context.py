@@ -36,6 +36,8 @@ def assemble_context(
             source_id = str(source.get("source_id") or source.get("sha256") or "")
             locator = str(source.get("locator") or "")
             source_lines.append("- " + label + (" [sha256:" + source_id[:12] + "]" if source_id else "") + (" @ " + locator if locator else ""))
+            if source.get("evidence_text"):
+                source_lines.append("  RAW EXCERPT: " + str(source["evidence_text"])[:1000])
         header = (
             "SOURCE [" + str(citation_index) + "]: [[" + str(item.get("title", "")) + "]] (" + str(item.get("type", "")) + ")\n"
             + ("PROVENANCE:\n" + "\n".join(source_lines) + "\n" if source_lines else "")
@@ -50,7 +52,7 @@ def assemble_context(
             continue
         block = header + excerpt
         pieces.append(block)
-        included.append({**item, "citation_index": citation_index})
+        included.append({**item, "citation_index": citation_index, "context_excerpt": excerpt})
         used += len(block) + 8
     return (
         "\n\n---\n\n".join(pieces),

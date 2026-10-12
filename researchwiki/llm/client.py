@@ -7,7 +7,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 
 class LLMClient:
@@ -124,3 +124,41 @@ class LLMClient:
         if not isinstance(value, dict):
             raise ValueError("Expected a JSON object")
         return value
+
+    def stream_generate(self, system: str, user: str, temperature: float = 0.1) -> Iterator[str]:
+        """Yield provider deltas. Never retry a partly emitted response."""
+        if not self.enabled:
+            raise RuntimeError("LLM is disabled; configure the provider API key")
+        body = {"model": self.model, "temperature": self._effective_temperature(temperature),
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], "stream": True}
+        request = urllib.request.Request(
+            self.base_url + "/chat/completions", data=json.dumps(body).encode("utf-8"),
+            headers={"Authorization": "Bearer " + self.api_key, "Content-Type": "application/json", "Accept": "text/event-stream"}, method="POST",
+        )
+        emitted = False
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                for raw in response:
+                    line = raw.decode("utf-8").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        if not emitted:
+                            raise RuntimeError("LLM stream contained no answer content")
+                        return
+                    if not data:
+                        continue
+                    payload = json.loads(data)
+                    if payload.get("error"):
+                        raise RuntimeError("LLM provider reported a streaming error")
+                    for choice in payload.get("choices") or []:
+                        delta = (choice.get("delta") or {}).get("content")
+                        if isinstance(delta, str) and delta:
+                            emitted = True
+                            yield delta
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError("LLM streaming request failed (HTTP " + str(exc.code) + ")") from exc
+        except (urllib.error.URLError, TimeoutError, socket.timeout, UnicodeError, ValueError) as exc:
+            raise RuntimeError("LLM stream disconnected or returned invalid data") from exc
+        raise RuntimeError("LLM stream disconnected before completion")

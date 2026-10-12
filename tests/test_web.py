@@ -160,7 +160,7 @@ class ResearchWikiWebTest(unittest.TestCase):
 
                 evaluation = client.post("/api/evaluation/run", params={"profile": "optimized"})
                 self.assertEqual(evaluation.status_code, 200)
-                self.assertEqual(evaluation.json()["question_count"], 5)
+                self.assertGreaterEqual(evaluation.json()["question_count"], 16)
                 self.assertIn("source_locator_coverage", evaluation.json()["metrics"])
                 self.assertEqual(client.get("/api/evaluation/runs").json()["total"], 1)
 

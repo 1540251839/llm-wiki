@@ -55,7 +55,15 @@ class WikiManager:
     def all_pages(self) -> Iterable[Path]:
         if not self.root.exists():
             return []
-        return self.root.rglob("*.md")
+        # Compiler navigation/history are not knowledge pages or retrieval evidence.
+        return (
+            path for path in self.root.rglob("*.md")
+            if not (
+                path.parent == self.root
+                and path.name in {"index.md", "log.md"}
+                and parse_frontmatter(path.read_text(encoding="utf-8")).get("compiler_auxiliary")
+            )
+        )
 
     def find_page(self, page_type: str, title: str) -> Optional[Path]:
         wanted = normalize_name(title)
