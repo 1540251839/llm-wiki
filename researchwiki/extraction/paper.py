@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..llm.client import LLMClient
-from ..models import ParsedDocument, StructuredPaper
+from ..models import ParsedDocument, StructuredPaper, EntityMention
 from .prompts import (
     PAPER_ANALYSIS_SYSTEM,
     PAPER_EXTRACTION_SYSTEM,
+    DEEP_EXTRACTION_SYSTEM,
     paper_analysis_prompt,
     paper_extraction_prompt,
 )
@@ -50,3 +51,66 @@ def extract_paper(
     if parsed is None:
         raise RuntimeError("LLM returned invalid paper extraction JSON: a non-empty title is required")
     return parsed
+
+
+def enrich_paper(
+    document: ParsedDocument,
+    baseline: StructuredPaper,
+    llm: LLMClient,
+    analysis: str = "",
+    purpose: str = "",
+    quality_mode: str = "standard",
+) -> StructuredPaper:
+    """Optional LLM stage: augment metadata, never erase confirmed local fields.
+
+    The deep model may return title/author/year for legacy compatibility, but
+    verified local metadata takes precedence; the basic parser never invokes it.
+    """
+    if not llm.enabled:
+        raise RuntimeError("Deep extraction requires a configured model API key")
+    try:
+        payload = llm.structured(
+            DEEP_EXTRACTION_SYSTEM,
+            paper_extraction_prompt(document.text, analysis=analysis, purpose=purpose),
+        )
+    except Exception as exc:
+        raise RuntimeError("Deep paper extraction failed: " + str(exc)) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Deep extraction must return a JSON object")
+    payload = dict(payload)
+    payload.setdefault("title", baseline.title or "Untitled Paper")
+    deep = _valid_llm_payload(payload)
+    if deep is None:
+        raise RuntimeError("Deep extraction returned an invalid paper object")
+
+    # Avoid treating PDF journal headers and file names as authoritative titles.
+    uncertain_title = baseline.title == "Untitled Paper" or baseline.title.casefold().startswith(
+        ("contents lists available", "information sciences ", "artificial intelligence ")
+    )
+    if uncertain_title and deep.title.strip() and deep.title != "Untitled Paper":
+        baseline.title = deep.title
+    baseline.authors = baseline.authors or deep.authors
+    baseline.year = baseline.year or deep.year
+    baseline.abstract = baseline.abstract or deep.abstract
+    # Prefer keywords from the author's paper, not model-generated substitutes.
+    baseline.methods = deep.methods
+    baseline.topics = deep.topics
+    baseline.research_problem = deep.research_problem
+    baseline.methodology = deep.methodology
+    baseline.experiment_info = deep.experiment_info
+    baseline.metrics = deep.metrics
+    baseline.contributions = deep.contributions
+    baseline.findings = deep.findings
+    baseline.limitations = deep.limitations
+
+    datasets: dict[str, EntityMention] = {
+        item.name.strip().casefold(): item for item in baseline.datasets if item.name.strip()
+    }
+    for item in deep.datasets:
+        key = item.name.strip().casefold()
+        if key:
+            # Prefer an explicit model-extracted experimental role over a base mention.
+            datasets[key] = item
+    baseline.datasets = list(datasets.values())
+    baseline.extraction_mode = "high" if quality_mode == "high" else "deep"
+    return baseline
