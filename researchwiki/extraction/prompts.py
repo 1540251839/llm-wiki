@@ -1,5 +1,5 @@
 PAPER_EXTRACTION_SYSTEM = """You extract scientific paper knowledge into JSON for a local research wiki.
-Do not invent information. Use null or [] when the paper does not provide an answer.
+Do not invent information. Use null, empty strings, or [] when the paper does not provide an answer. Extract author-provided keywords only (do not invent keywords). Experiment details, method principles and dataset statistics must be explicitly supported by source text. A standalone method must be a recognizable named approach, not a generic component or bare keyword. Keep topic labels broad and coherent.
 Distinguish author claims from your own summary. Keep entity names concise and canonical.
 Return only valid JSON with this shape:
 {
@@ -7,10 +7,12 @@ Return only valid JSON with this shape:
   "authors": ["string"],
   "year": 2024,
   "abstract": "string or null",
+  "keywords": ["author-provided keyword"],
+  "experiment_info": "experiment settings explicitly stated in the paper",
   "research_problem": "string",
   "methodology": "string",
-  "methods": [{"name": "string", "description": "string", "role": "string"}],
-  "datasets": [{"name": "string", "description": "string", "role": "string"}],
+  "methods": [{"name": "string", "description": "string", "role": "string", "principle": "string"}],
+  "datasets": [{"name": "string", "description": "string", "role": "string", "statistics": "string"}],
   "metrics": ["string"],
   "contributions": ["string"],
   "findings": ["string"],
