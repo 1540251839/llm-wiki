@@ -314,7 +314,7 @@ def ingest(
                 _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
             paper = enrich_paper(
                 document, baseline=base, llm=llm, analysis=analysis,
-                purpose=_purpose(config), quality_mode=mode,
+                purpose=_purpose(config), quality_mode=mode, source_path=source_path,
             )
         title_duplicate = db.find_indexed_title_duplicate(paper.title, file_hash)
         if title_duplicate:
@@ -559,7 +559,7 @@ def parse_only(
     analysis = analyze_paper(document, client, purpose=_purpose(config)) if mode == "high" else ""
     return enrich_paper(
         document, base, client, analysis=analysis,
-        purpose=_purpose(config), quality_mode=mode,
+        purpose=_purpose(config), quality_mode=mode, source_path=path,
     )
 
 
