@@ -224,12 +224,13 @@ async function openDocument(id) {
         <div class="detail-cell"><span>原始文件</span><strong>${escapeHTML(item.raw_name || item.source_name || "—")}</strong></div>
         <div class="detail-cell"><span>文档 ID</span><strong title="${escapeHTML(item.id)}">${escapeHTML(item.id.slice(0, 16))}…</strong></div>
         <div class="detail-cell"><span>队列阶段</span><strong>${escapeHTML(job.stage || "—")}</strong></div>
-        <div class="detail-cell"><span>处理模式 / 尝试</span><strong>${escapeHTML(job.quality_mode || "standard")} · ${escapeHTML(job.attempts || 0)}/${escapeHTML(job.max_attempts || 0)}</strong></div>
+        <div class="detail-cell"><span>处理模式 / 尝试</span><strong>${escapeHTML(extraction.extraction_mode || job.quality_mode || "basic")} · ${escapeHTML(job.attempts || 0)}/${escapeHTML(job.max_attempts || 0)}</strong></div>
       </div>
       ${reasons.length ? `<div class="notice">${reasons.map(escapeHTML).join("；")}</div>` : ""}
       ${item.error_message || job.error_message || job.last_error ? `<div class="detail-section"><h3>失败日志</h3><pre class="failure-log">${escapeHTML(item.error_message || job.error_message || job.last_error)}</pre></div>` : ""}
       <div class="detail-section"><h3>结构化抽取</h3>
         <p>${escapeHTML(extraction.abstract || "暂无摘要")}</p>
+        <p><strong>关键词：</strong>${escapeHTML((extraction.keywords || []).join("、") || "—")}</p>
         <p><strong>方法：</strong>${escapeHTML((extraction.methods || []).map((x) => x.name || x).join("、") || "—")}</p>
         <p><strong>数据集：</strong>${escapeHTML((extraction.datasets || []).map((x) => x.name || x).join("、") || "—")}</p>
         <p><strong>主题：</strong>${escapeHTML((extraction.topics || []).join("、") || "—")}</p>
@@ -238,7 +239,7 @@ async function openDocument(id) {
       ${reviews.length ? `<div class="detail-section"><h3>待审核</h3><div class="review-list">${reviews.map((review) => `<div class="review-item"><div><span class="badge ${review.severity === "error" ? "error" : "warning"}">${escapeHTML(review.kind)}</span><p>${escapeHTML(review.message)}</p></div><button class="row-action" data-resolve-review="${review.id}">标为已处理</button></div>`).join("")}</div></div>` : ""}
       <div class="dialog-actions">
         ${item.raw_name ? `<a class="secondary" target="_blank" rel="noopener" href="/api/documents/${encodeURIComponent(item.id)}/file">查看原始资料 ↗</a>` : ""}
-        ${item.status === "INDEXED" && job.quality_mode === "basic" ? '<button class="primary" id="enrich-document">使用模型深度分析</button>' : ""}
+        ${item.status === "INDEXED" && extraction.extraction_mode === "basic" && state.modelConfigured && !["PENDING", "RUNNING"].includes(job.status) ? '<button class="primary" id="enrich-document">使用模型深度分析</button>' : ""}
         <button class="danger" id="delete-document">移到回收区</button>
         ${item.retryable ? `<button class="secondary" id="retry-document-high">高质量重试</button><button class="primary" id="retry-document">标准重试</button>` : ""}
       </div>`;
@@ -452,9 +453,10 @@ function startPolling(id) {
     try {
       const item = await api(`/api/documents/${encodeURIComponent(id)}`);
       await Promise.all([loadDocuments(), loadOverview()]);
-      if (["INDEXED", "FAILED"].includes(item.status)) {
-        if (item.status === "INDEXED") toast("资料处理完成");
-        if (item.status === "FAILED") toast("资料处理失败，请查看详情");
+      const jobStatus = item.job?.status || "";
+      if (jobStatus === "FAILED") { toast(item.status === "INDEXED" ? "深度分析失败；已有 Wiki 已保留" : "资料处理失败，请查看详情"); return; }
+      if (jobStatus === "SUCCEEDED" || (!jobStatus && ["INDEXED", "FAILED"].includes(item.status))) {
+        toast(item.status === "INDEXED" ? "资料处理完成" : "资料处理失败，请查看详情");
         return;
       }
     } catch (_) { /* A later poll may recover from a transient local error. */ }
