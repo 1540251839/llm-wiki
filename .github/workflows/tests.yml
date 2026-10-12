@@ -2,7 +2,7 @@ name: ResearchWiki tests
 
 on:
   push:
-    branches: [feature/selectable-wiki-page-types]
+    branches: [main]
   pull_request:
 
 jobs:
