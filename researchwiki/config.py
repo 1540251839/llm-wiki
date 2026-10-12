@@ -36,7 +36,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "quality_mode": "basic",
         "max_attempts": 3,
     },
-    "parser": {"backend": "pymupdf"},
+    "parser": {"backend": "pymupdf", "grobid_url": ""},
 }
 
 
