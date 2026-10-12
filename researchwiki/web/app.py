@@ -5,15 +5,16 @@ import json
 import logging
 import re
 import threading
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from .. import __version__
 from ..app import delete_source, do_ask_with_metadata, do_answer_events, do_search, ingest, initialize, rebuild
@@ -24,6 +25,7 @@ from ..graph import extract_graph
 from ..index.database import Database
 from ..llm.client import LLMClient
 from ..parsing.pdf import parse_file
+from ..secrets import read_deepseek_key, save_deepseek_key, delete_deepseek_key
 from ..wiki.manager import parse_frontmatter
 
 
@@ -34,11 +36,35 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 PROCESSING_STATUSES = {"UPLOADED", "EXTRACTING", "EXTRACTED", "WIKI_CREATED"}
 _INGEST_LOCK = threading.Lock()
 _UPLOAD_LOCK = threading.Lock()
+_SETTINGS_LOCK = threading.Lock()
 
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     top_k: Optional[int] = Field(default=None, ge=1, le=20)
+
+
+class DeepSeekCredentialRequest(BaseModel):
+    api_key: SecretStr = Field(min_length=8, max_length=512)
+
+
+def _check_local_settings_write(request: Request) -> None:
+    """Defense in depth for credential updates on a no-auth localhost server."""
+    client = request.client.host if request.client else ""
+    host = request.headers.get("host", "")
+    target = urlparse("http://" + host).hostname or ""
+    # "testclient" / "testserver" exist only in in-process FastAPI tests.
+    is_test_client = client == "testclient" and target == "testserver"
+    if not is_test_client and (client not in {"127.0.0.1", "::1"} or
+                               target not in {"localhost", "127.0.0.1", "::1"}):
+        raise HTTPException(status_code=403, detail="Model credentials can only be changed locally")
+    if request.headers.get("x-rw-config-action") != "1":
+        raise HTTPException(status_code=403, detail="Explicit settings action header required")
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-origin settings changes are forbidden")
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).netloc.lower() != host.lower():
+        raise HTTPException(status_code=403, detail="Cross-origin settings changes are forbidden")
 
 
 def _relative_name(root: Path, value: str) -> str:
@@ -853,6 +879,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "timeout_seconds": llm.timeout_seconds,
             },
             "wiki": {"language": config.wiki_language, "original_text_preserved": True},
+            "credentials": {"stored_locally": bool(read_deepseek_key(config.root)),
+                            "configured": llm.enabled},
             "retrieval": {
                 "top_k": config.top_k,
                 "graph_expansion": bool(config.retrieval.get("graph_expansion", True)),
@@ -860,6 +888,28 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "max_context_chars": int(config.retrieval.get("max_context_chars", 48000)),
             },
         }
+
+    @app.post("/api/settings/deepseek-key")
+    def store_deepseek_key(request: Request, payload: DeepSeekCredentialRequest) -> Dict[str, Any]:
+        _check_local_settings_write(request)
+        secret = payload.api_key.get_secret_value().strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{8,512}", secret):
+            raise HTTPException(status_code=422, detail="Invalid API key format")
+        with _SETTINGS_LOCK:
+            save_deepseek_key(config.root, secret)
+            config.llm = {**config.llm, "provider": "deepseek", "api_key": secret}
+        return {"ok": True, "configured": True, "stored_locally": True}
+
+    @app.delete("/api/settings/deepseek-key")
+    def clear_deepseek_key(request: Request) -> Dict[str, Any]:
+        _check_local_settings_write(request)
+        with _SETTINGS_LOCK:
+            delete_deepseek_key(config.root)
+            # Clearing a locally stored key does not revoke a provider credential,
+            # nor does it clear a key explicitly supplied by the user's environment.
+            config.llm = dict(load_config(config.root).llm)
+        return {"ok": True, "configured": LLMClient(config.llm).enabled,
+                "stored_locally": False}
 
     @app.post("/api/settings/test")
     def test_model_connection() -> Dict[str, Any]:
