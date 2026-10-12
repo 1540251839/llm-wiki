@@ -32,10 +32,10 @@ _JOURNAL_HEADERS = (
     "proceedings of", "arxiv:", "doi:", "http:", "https:", "www.",
 )
 _STOP_SECTION = re.compile(
-    r"(?im)^\\s*(?:key\\s*words|keywords?|index\\s+terms|关键词)\\b|"
-    r"(?im:^\\s*(?:\\d{1,2}\\s*[.、)]?\\s*)?(?:introduction|background|related work|引言|绪论|前言)\\b)|"
-    r"(?im:^\\s*a\\s*b\\s*s\\s*t\\s*r\\s*a\\s*c\\s*t\\b)|"
-    r"(?im:^\\s*(?:2|ii)\\s*[.、 ]\\s*\\S+)"
+    r"(?im)^\s*(?:key\s*words|keywords?|index\s+terms|关键词)\b|"
+    r"(?im:^\s*(?:\d{1,2}\s*[.、)]?\s*)?(?:introduction|background|related work|引言|绪论|前言)\b)|"
+    r"(?im:^\s*a\s*b\s*s\s*t\s*r\s*a\s*c\s*t\b)|"
+    r"(?im:^\s*(?:2|ii)\s*[.、 ]\s*\S+)"
 
 )
 
