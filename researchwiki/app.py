@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple, Union, Optional
 
 from .config import Config
 from .extraction.paper import analyze_paper, extract_paper
+from .extraction.basic import extract_basic
 from .graph import extract_graph
 from .index.database import Database
 from .llm.client import LLMClient
@@ -260,8 +261,8 @@ def ingest(
     db = Database(config.db_path)
     try:
         mode = (quality_mode or config.quality_mode).strip().lower()
-        if mode not in {"standard", "high"}:
-            raise ValueError("quality_mode must be 'standard' or 'high'")
+        if mode not in {"basic", "standard", "high"}:
+            raise ValueError("quality_mode must be basic, standard or high")
         duplicate = db.find_by_hash(file_hash)
         if duplicate and duplicate["status"] == "INDEXED" and not resume:
             return {"status": "already_exists", "title": duplicate["title"], "paper_path": None, "entity_paths": []}
@@ -286,15 +287,25 @@ def ingest(
         _job_stage(db, job_id, "PARSE")
         document = parse_file(source_path)
         db.update_paper_status(file_hash, "EXTRACTING")
-        llm = llm_client or LLMClient(config.llm)
-        analysis = ""
-        if mode == "high":
-            _job_stage(db, job_id, "ANALYZE")
-            analysis = analyze_paper(document, llm=llm, purpose=_purpose(config))
-            analysis_path = config.root / "data" / "analyses" / (file_hash + ".md")
-            _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
         _job_stage(db, job_id, "EXTRACT")
-        paper = extract_paper(document, llm=llm, analysis=analysis, purpose=_purpose(config))
+        base = extract_basic(document)
+        if mode == "basic":
+            paper = base
+        else:
+            llm = llm_client or LLMClient(config.llm)
+            analysis = ""
+            if mode == "high":
+                _job_stage(db, job_id, "ANALYZE")
+                analysis = analyze_paper(document, llm=llm, purpose=_purpose(config))
+                analysis_path = config.root / "data" / "analyses" / (file_hash + ".md")
+                _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
+            paper = extract_paper(document, llm=llm, analysis=analysis, purpose=_purpose(config))
+            if not paper.abstract:
+                paper.abstract = base.abstract
+            if not paper.keywords:
+                paper.keywords = base.keywords
+            if not paper.datasets:
+                paper.datasets = base.datasets
         title_duplicate = db.find_indexed_title_duplicate(paper.title, file_hash)
         if title_duplicate:
             raise RuntimeError(
