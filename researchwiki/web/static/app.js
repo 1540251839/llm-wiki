@@ -394,19 +394,15 @@ async function openWikiPage(button) {
 function openUpload() {
   const message = $("#upload-message");
   const submit = $("#upload-submit");
-  if (!state.modelConfigured) {
-    message.textContent = "尚未配置 DEEPSEEK_API_KEY。浏览与搜索可用，但新资料无法抽取。";
-    submit.disabled = true;
-  } else {
-    message.textContent = "";
-    submit.disabled = false;
-  }
+  const offline = $("#quality-mode").value === "basic";
+  message.textContent = offline ? "基础抽取在本机执行，不调用模型。" : state.modelConfigured ? "深度抽取将调用已配置的模型服务。" : "未配置模型密钥，请改用基础抽取。";
+  submit.disabled = !offline && !state.modelConfigured;
   $("#upload-dialog").showModal();
 }
 
 async function submitUpload(event) {
   event.preventDefault();
-  if (!state.modelConfigured) return;
+  if (!state.modelConfigured && $("#quality-mode").value !== "basic") return;
   const file = $("#file-input").files[0];
   if (!file) return;
   const button = $("#upload-submit");
@@ -821,6 +817,7 @@ function bindEvents() {
   $("#header-upload").addEventListener("click", openUpload);
   $("#documents-upload").addEventListener("click", openUpload);
   $("#upload-form").addEventListener("submit", submitUpload);
+  $("#quality-mode").addEventListener("change", () => { if ($("#upload-dialog").open) { const offline = $("#quality-mode").value === "basic"; $("#upload-submit").disabled = !offline && !state.modelConfigured; $("#upload-message").textContent = offline ? "基础抽取在本机执行，不调用模型。" : state.modelConfigured ? "深度抽取将调用模型服务。" : "未配置模型密钥，请选择基础抽取。"; } });
   $("#upload-close").addEventListener("click", () => $("#upload-dialog").close());
   $("#upload-cancel").addEventListener("click", () => $("#upload-dialog").close());
   $("#detail-close").addEventListener("click", () => $("#document-dialog").close());
