@@ -368,6 +368,30 @@ function renderMarkdown(text, citations = false, citationScope = "qa") {
   return output.join("");
 }
 
+const wikiQuestions = {
+  paper: "这篇论文研究什么、怎么做、得到什么结果？",
+  topic: "这个方向是什么、有哪些具体研究问题？",
+  method: "这个方法是什么、怎样工作、在哪些研究中使用？",
+  dataset: "这个数据集研究什么任务，哪些论文怎样使用它？",
+};
+
+function renderWikiReading(markdown, type) {
+  const body = String(markdown || "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+  const matches = [...body.matchAll(/^##\s+(.+)$/gm)];
+  if (!matches.length) return renderMarkdown(body, true, "wiki");
+  return matches.map((match, index) => {
+    const name = match[1].trim();
+    const start = match.index + match[0].length;
+    const end = matches[index + 1]?.index ?? body.length;
+    const section = body.slice(start, end).trim();
+    const content = renderMarkdown(section, true, "wiki");
+    const supplementary = /^(原文摘要|字段级出处|原文来源|来源证据|证据说明|关键词)/.test(name);
+    return supplementary
+      ? `<details class="wiki-supplement"><summary>${escapeHTML(name)}</summary><div class="prose">${content}</div></details>`
+      : `<section class="wiki-section"><h3>${escapeHTML(name)}</h3><div class="prose">${content}</div></section>`;
+  }).join("");
+}
+
 function sourceFileURL(source) {
   const rawURL = source.file_url || (source.source_id ? `/api/documents/${encodeURIComponent(source.source_id)}/file?inline=true` : "");
   if (!rawURL || !rawURL.startsWith("/api/documents/")) return "";
@@ -395,7 +419,32 @@ async function openWikiPage(button) {
     const sourceCards = (page.sources || []).map((source, index) => { const citationIndex = Number(source.citation_index || index + 1); return `<article class="citation-card wiki-source-card" id="wiki-source-${citationIndex}" tabindex="-1"><span class="citation-number">${citationIndex}</span>${evidenceMarkup(source)}</article>`; }).join("");
     const relatedCards = (page.related || []).map((item) => `<button class="source-card" type="button" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}"><strong>${escapeHTML(item.title)}</strong><br>${escapeHTML(item.type)} · score ${Number(item.score || 0).toFixed(1)}</button>`).join("");
     const backlinks = (page.backlinks || []).map((item) => `<button class="inline-link" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}">↶ ${escapeHTML(item.title)}</button>`).join("");
-    root.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHTML(wikiTypeLabels[page.type] || page.type)} · ${(page.sources || []).length} 个来源</p><h2>${escapeHTML(page.display_title || page.title)}</h2></div></div><div class="wiki-location">${escapeHTML(page.path)}</div>${page.type === "topic" && state.modelConfigured && (page.sources || []).length >= 2 ? '<div class="detail-section"><button class="secondary" id="synthesize-topic" type="button">用模型生成跨论文综合（需复核）</button></div>' : ""}<div class="prose wiki-prose">${renderMarkdown(page.content, true, "wiki")}</div><details class="raw-details"><summary>查看 Markdown 原文</summary><pre class="markdown">${escapeHTML(page.content)}</pre></details><div class="detail-section"><h3>来源证据</h3><div class="evidence-strip">${sourceCards || '<p class="muted">暂无可回查来源，此页需要审核。</p>'}</div></div><div class="detail-section"><h3>反向链接</h3><div class="backlink-list">${backlinks || '<p class="muted">暂无页面引用此主题。</p>'}</div></div>${relatedCards ? `<div class="detail-section"><h3>相关主题</h3><div class="source-list">${relatedCards}</div></div>` : ""}`;
+    const displayTitle = page.display_title || page.title;
+    const nativeTitle = displayTitle !== page.title ? `<p class="wiki-original-title">原始名称：${escapeHTML(page.title)}</p>` : "";
+    const synthesisControl = page.type === "topic" && state.modelConfigured && (page.sources || []).length >= 2
+      ? '<button class="secondary" id="synthesize-topic" type="button">生成跨论文综合（需复核）</button>' : "";
+    root.innerHTML = `
+      <header class="wiki-reading-header">
+        <p class="eyebrow">${escapeHTML(wikiTypeLabels[page.type] || page.type)} · ${(page.sources || []).length} 个来源</p>
+        <h2>${escapeHTML(displayTitle)}</h2>
+        ${nativeTitle}
+        <p class="wiki-reading-question">${escapeHTML(wikiQuestions[page.type] || "阅读并核对相关知识")}</p>
+        ${synthesisControl}
+      </header>
+      <article class="wiki-reading-body">${renderWikiReading(page.content, page.type)}</article>
+      <details class="wiki-supplement">
+        <summary>查看来源、原文定位与证据片段（${(page.sources || []).length}）</summary>
+        <div class="evidence-strip">${sourceCards || '<p class="muted">尚无可回查来源，请先审核。</p>'}</div>
+      </details>
+      <details class="wiki-supplement">
+        <summary>引用它的页面与相关知识</summary>
+        <div class="backlink-list">${backlinks || '<p class="muted">暂无反向链接。</p>'}</div>
+        ${relatedCards ? `<div class="source-list">${relatedCards}</div>` : ""}
+      </details>
+      <details class="wiki-supplement"><summary>高级信息：路径与 Markdown</summary>
+        <p class="wiki-location">${escapeHTML(page.path)}</p>
+        <pre class="markdown">${escapeHTML(page.content)}</pre>
+      </details>`;
     bindWikiLinks(root);
     $("#synthesize-topic", root)?.addEventListener("click", async (event) => {
       const control = event.currentTarget;
