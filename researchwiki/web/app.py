@@ -420,7 +420,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             previous_job = db.latest_ingest_job(paper_id)
             requested_mode = quality_mode.strip().lower() or str((previous_job or {}).get("quality_mode") or config.quality_mode)
             if requested_mode not in {"basic", "standard", "high"}:
-                raise HTTPException(status_code=400, detail="quality_mode must be standard or high")
+                raise HTTPException(status_code=400, detail="quality_mode must be basic, standard or high")
             db.update_paper_status(paper_id, "UPLOADED")
             job = db.retry_ingest_job(int(previous_job["id"]), requested_mode) if previous_job else None
             if job is None:
@@ -435,6 +435,31 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             db.close()
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"document": _document(config, updated or paper, job=job), "job": job, "deduplicated": False, "action": "queued"}
+
+    @app.post("/api/documents/{paper_id}/enrich", status_code=202)
+    def enrich_document(
+        paper_id: str,
+        quality_mode: str = Query(default="standard", pattern="^(standard|high)$"),
+    ) -> Dict[str, Any]:
+        """Explicitly reprocess an existing document with optional LLM analysis."""
+        if not LLMClient(config.llm).enabled:
+            raise HTTPException(status_code=409, detail="Deep extraction requires a configured model API key")
+        with _UPLOAD_LOCK:
+            db = Database(config.db_path)
+            try:
+                paper = db.get_paper(paper_id)
+                if not paper or str(paper.get("status")) != "INDEXED":
+                    raise HTTPException(status_code=409, detail="Only indexed documents can be enriched")
+                candidates = [Path(v) for v in (str(paper.get("raw_path") or ""), str(paper.get("source_path") or "")) if v]
+                source = next((p for p in candidates if p.is_file()), None)
+                if source is None:
+                    raise HTTPException(status_code=409, detail="Original source file is missing")
+                job = db.enqueue_ingest_job(paper_id, str(source), quality_mode, config.max_ingest_attempts)
+                db.update_paper_status(paper_id, "UPLOADED")
+            finally:
+                db.close()
+        app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
+        return {"action": "queued", "job": job, "source_id": paper_id}
 
     @app.delete("/api/documents/{paper_id}")
     def remove_document(
