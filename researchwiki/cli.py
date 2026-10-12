@@ -22,10 +22,11 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the local workspace")
     parse_cmd = sub.add_parser("parse", help="extract structured paper JSON without writing Wiki pages")
     parse_cmd.add_argument("paper")
+    parse_cmd.add_argument("--deep", action="store_true", help="use LLM instead of the default offline metadata extractor")
     ingest_cmd = sub.add_parser("ingest", help="import a paper and update the Wiki")
     ingest_cmd.add_argument("paper")
     ingest_cmd.add_argument("--resume", action="store_true", help="re-run an existing/failed import")
-    ingest_cmd.add_argument("--quality", choices=("standard", "high"), default=None, help="use one-call or two-stage extraction")
+    ingest_cmd.add_argument("--quality", choices=("basic", "standard", "high"), default=None, help="basic=offline (default), standard=deep, high=two-pass deep")
     search_cmd = sub.add_parser("search", help="search indexed Wiki pages")
     search_cmd.add_argument("query")
     search_cmd.add_argument("--top-k", type=int, default=None)
@@ -64,7 +65,7 @@ def main(argv: Any = None) -> None:
             for key, value in paths.items():
                 print(f"  {key}: {value}")
         elif args.command == "parse":
-            print(json.dumps(parse_only(config, args.paper).to_dict(), ensure_ascii=False, indent=2))
+            print(json.dumps(parse_only(config, args.paper, mode="standard" if args.deep else "basic").to_dict(), ensure_ascii=False, indent=2))
         elif args.command == "ingest":
             result = ingest(config, args.paper, resume=args.resume, quality_mode=args.quality)
             if result["status"] == "already_exists":
