@@ -18,9 +18,9 @@ LABELS = {
     "STUDIES_TOPIC": "研究主题",
     "REFERENCES_METHOD": "关联方法",
     "MENTIONS_DATASET": "提及数据集",
-    "TESTED_ON": "测试数据集",
-    "TRAINED_ON": "训练数据集",
-    "VALIDATED_ON": "验证数据集",
+    "TESTED_ON": "测试关联（待核对）",
+    "TRAINED_ON": "训练关联（待核对）",
+    "VALIDATED_ON": "验证关联（待核对）",
     "RELATED": "相关研究",
 }
 
