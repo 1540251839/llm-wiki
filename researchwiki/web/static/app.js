@@ -293,7 +293,7 @@ const wikiTypeLabels = {paper: "论文", topic: "主题", method: "方法", data
 
 function setWikiType(type) {
   $("#wiki-type-filter").value = type;
-  $(".wiki-type-tab").forEach((button) => {
+  $$(".wiki-type-tab").forEach((button) => {
     const selected = button.dataset.wikiType === type;
     button.classList.toggle("active", selected);
     button.setAttribute("aria-pressed", String(selected));
@@ -407,7 +407,7 @@ async function openWikiPage(button) {
         await openWikiPage(button);
       } catch (error) { toast(`跨论文综合失败：${error.message}`); control.disabled = false; control.textContent = "用模型生成跨论文综合（需复核）"; }
     });
-    $('[data-wiki-citation]', root).forEach((citation) => citation.addEventListener("click", () => { const card = $(`#wiki-source-${citation.dataset.wikiCitation}`, root); if (!card) return toast("该编号没有对应的来源证据"); $$(".wiki-source-card", root).forEach((item) => item.classList.remove("highlight")); card.classList.add("highlight"); card.scrollIntoView({ behavior: "smooth", block: "center" }); card.focus({ preventScroll: true }); }));
+    $$('[data-wiki-citation]', root).forEach((citation) => citation.addEventListener("click", () => { const card = $(`#wiki-source-${citation.dataset.wikiCitation}`, root); if (!card) return toast("该编号没有对应的来源证据"); $$(".wiki-source-card", root).forEach((item) => item.classList.remove("highlight")); card.classList.add("highlight"); card.scrollIntoView({ behavior: "smooth", block: "center" }); card.focus({ preventScroll: true }); }));
   } catch (error) { root.innerHTML = `<div class="empty-state">读取失败：${escapeHTML(error.message)}</div>`; }
 }
 
@@ -855,7 +855,7 @@ function bindEvents() {
     window.clearTimeout(documentSearchTimer);
     documentSearchTimer = window.setTimeout(loadWiki, 250);
   });
-  $(".wiki-type-tab").forEach((button) => button.addEventListener("click", () => setWikiType(button.dataset.wikiType)));
+  $$(".wiki-type-tab").forEach((button) => button.addEventListener("click", () => setWikiType(button.dataset.wikiType)));
   $("#wiki-type-filter").addEventListener("change", () => setWikiType($("#wiki-type-filter").value));
   $("#compile-build").addEventListener("click", buildKnowledge);
   $("#compilation-refresh").addEventListener("click", loadCompilation);
