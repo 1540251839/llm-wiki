@@ -6,18 +6,20 @@ Return only valid JSON with this shape:
   "title": "string",
   "authors": ["string"],
   "year": 2024,
-  "abstract": "string or null",
+  "abstract": "original text or null",
+  "abstract_zh": "faithful Simplified Chinese translation or empty string",
   "keywords": ["author-provided keyword"],
   "experiment_info": "experiment settings explicitly stated in the paper",
   "research_problem": "string",
   "methodology": "string",
-  "methods": [{"name": "string", "description": "string", "role": "string", "principle": "string"}],
-  "datasets": [{"name": "string", "description": "string", "role": "string", "statistics": "string"}],
+  "methods": [{"name": "original method name", "name_zh": "Chinese label", "description": "string", "role": "string", "principle": "string"}],
+  "datasets": [{"name": "original dataset name", "name_zh": "Chinese label when appropriate", "description": "string", "role": "string", "statistics": "string"}],
   "metrics": ["string"],
   "contributions": ["string"],
   "findings": ["string"],
   "limitations": ["string"],
-  "topics": ["string"]
+  "topics": ["original canonical research topic"],
+  "topic_labels_zh": {"original canonical research topic": "concise Chinese label"}
 }"""
 
 
@@ -26,16 +28,18 @@ Return ONLY a JSON object. Use the source text, not guesses or prior training kn
 Do not reconstruct the abstract or invent author keywords. Leave unsupported claims blank.
 The desired schema is:
 {
+  "abstract_zh": "faithful Simplified Chinese rendering of the source abstract, or empty string",
   "research_problem": "string",
   "methodology": "string",
-  "methods": [{"name": "string", "description": "definition from the paper", "role": "application", "principle": "explicit mechanism"}],
-  "datasets": [{"name": "string", "description": "string", "role": "verified experimental usage or mention", "statistics": "explicit source numbers only"}],
+  "methods": [{"name": "original canonical method name", "name_zh": "short Chinese equivalent", "description": "definition from the paper", "role": "application", "principle": "explicit mechanism"}],
+  "datasets": [{"name": "original dataset name", "name_zh": "short Chinese equivalent if helpful", "description": "string", "role": "verified experimental usage or mention", "statistics": "explicit source numbers only"}],
   "experiment_info": "datasets, setup, baselines and metrics as explicitly stated",
   "metrics": ["string"],
   "contributions": ["string"],
   "findings": ["string"],
   "limitations": ["string"],
-  "topics": ["broad research-topic label"]
+  "topics": ["broad topic name in its original established form"],
+  "topic_labels_zh": {"topic name above": "Chinese label"}
 }
 Avoid generic keywords as methods. Do not infer experiment usage from a dataset name appearing only in related work.
 Differentiate the authors' stated claims from independently established facts.
@@ -78,3 +82,39 @@ Be explicit when evidence is insufficient. Preserve disagreements between papers
 Use inline numbered citations in the form [1], [2], matching the supplied SOURCE numbers,
 and finish with a Sources section. Never cite a source number that was not supplied.
 Do not fabricate page numbers or claims."""
+
+
+
+def extraction_language_rules(language: str = "zh-CN") -> str:
+    """Default Chinese prose without altering bibliographic/source identity."""
+    if not str(language).lower().startswith("zh"):
+        return "\nWrite explanatory prose in English. Preserve source wording and original entity names."
+    return """
+OUTPUT LANGUAGE POLICY — SIMPLIFIED CHINESE FIRST:
+- Write generated interpretation in clear Simplified Chinese: research_problem,
+  methodology, experiment_info, contributions, findings, limitations, and the
+  description/role/principle/statistics of methods and datasets.
+- Preserve the exact original paper title, author names, year, abstract,
+  author-supplied keywords, dataset/method names, model acronyms, DOI and
+  evidence quotations. Do not silently replace original names with translations.
+- If the source has an abstract, optionally provide its faithful Chinese rendering
+  in abstract_zh; never overwrite the original abstract. If insufficient source
+  evidence exists, return an empty abstract_zh.
+- Optional name_zh and topic_labels_zh are human-readable Chinese display labels,
+  not new entities or facts. Keep canonical names in name/topics unchanged.
+- Do not infer experimental use from a mention alone, invent translations of
+  missing text, fabricate results or alter numeric values.
+"""
+
+
+def answer_language_rules(language: str = "zh-CN") -> str:
+    if not str(language).lower().startswith("zh"):
+        return "\nAnswer in English unless the user expressly requests another language."
+    return """
+Answer in natural Simplified Chinese by default, even if the retrieved papers
+are in English. Keep paper titles, named methods, datasets, abbreviations,
+citations, DOIs, numbers and verbatim evidence quotations in their source
+language. Translate explanations rather than rewriting original evidence.
+If the user explicitly requests another language, follow that request.
+Do not add unsupported statements or pretend a translation was verified.
+"""
