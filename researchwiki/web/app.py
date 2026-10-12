@@ -487,6 +487,37 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"action": "queued", "job": job, "source_id": paper_id}
 
+    @app.post("/api/documents/{paper_id}/supplement")
+    def supplement_document(
+        request: Request,
+        paper_id: str,
+        focus: str = Query(pattern="^(method|experiment|overview)$"),
+    ) -> Dict[str, Any]:
+        """Explicit on-demand update of a single research facet."""
+        _check_local_settings_write(request)
+        if not LLMClient(config.llm).enabled:
+            raise HTTPException(status_code=409, detail="Focused extraction requires a model API key")
+        if not _INGEST_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="An extraction or compilation is already running")
+        try:
+            db = Database(config.db_path)
+            try:
+                paper = db.get_paper(paper_id)
+                if not paper or paper.get("status") != "INDEXED":
+                    raise HTTPException(status_code=409, detail="Only indexed sources can be supplemented")
+                raw = Path(str(paper.get("raw_path") or ""))
+                if not raw.is_file() or hashlib.sha256(raw.read_bytes()).hexdigest() != paper_id:
+                    raise HTTPException(status_code=409, detail="Original source unavailable or changed")
+            finally:
+                db.close()
+            from ..app import ingest
+            result = ingest(config, raw, resume=True, quality_mode="standard", focus=focus)
+            return {"ok": True, "focus": focus, "document": result}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail="Focused extraction failed; previous content preserved") from exc
+        finally:
+            _INGEST_LOCK.release()
+
     @app.delete("/api/documents/{paper_id}")
     def remove_document(
         paper_id: str,
