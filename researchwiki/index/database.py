@@ -975,12 +975,30 @@ class Database:
                     source_by_path[str(value)] = source_id
                     source_by_path[Path(str(value)).as_posix()] = source_id
         page_ids: Dict[str, int] = {}
+        reused_pages = 0
+        refreshed_pages = 0
         for path in pages:
             content = path.read_text(encoding="utf-8")
             front = parse_frontmatter(content)
             page_type = str(front.get("type") or path.parent.name.rstrip("s"))
             title = str(front.get("title") or front.get("name") or path.stem.replace("-", " "))
             old = existing.get(str(path))
+            # Reindex only pages whose generated content actually changed.
+            # A stable compiled page retains its FTS, chunks and precise source
+            # locators. Link edges are still reconciled globally below.
+            if old and str(old["title"]) == title and str(old["type"]) == page_type:
+                cached = self.conn.execute(
+                    "SELECT content FROM chunks WHERE page_id=?", (int(old["id"]),)
+                ).fetchone()
+                has_provenance = self.conn.execute(
+                    "SELECT 1 FROM page_sources WHERE page_id=? LIMIT 1",
+                    (int(old["id"]),)
+                ).fetchone()
+                if cached and cached["content"] == content and has_provenance:
+                    page_ids[str(path)] = int(old["id"])
+                    reused_pages += 1
+                    continue
+            refreshed_pages += 1
             if old:
                 page_id = int(old["id"])
                 self.conn.execute("UPDATE wiki_pages SET title=?, type=?, updated_at=datetime('now') WHERE id=?", (title, page_type, page_id))
@@ -1057,7 +1075,8 @@ class Database:
                    )"""
             )
         self.conn.commit()
-        return {"pages": len(pages), "links": link_count, "stale": len(stale_paths)}
+        return {"pages": len(pages), "links": link_count, "stale": len(stale_paths),
+                "reused": reused_pages, "refreshed": refreshed_pages}
 
     def search(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
         fetch_limit = max(top_k * 4, 16)
