@@ -93,8 +93,8 @@ def enrich_paper(
     # Plain-text fixtures often have an unmarked first line; deep extraction
     # can correct such weak title guesses. An explicit Title:/# heading remains authoritative.
     if source_path is not None and source_path.suffix.lower() in {".txt", ".md", ".markdown"}:
-        explicit = re.search(r"(?im)^\\s*(?:title|题目|论文标题)\\s*[:：]", document.text[:2000])
-        marked = source_path.suffix.lower() in {".md", ".markdown"} and re.search(r"(?m)^#\\s+\\S", document.text[:2000])
+        explicit = re.search(r"(?im)^\s*(?:title|题目|论文标题)\s*[:：]", document.text[:2000])
+        marked = source_path.suffix.lower() in {".md", ".markdown"} and re.search(r"(?m)^#\s+\S", document.text[:2000])
         uncertain_title = uncertain_title or not (explicit or marked)
     if uncertain_title and deep.title.strip() and deep.title != "Untitled Paper":
         baseline.title = deep.title
