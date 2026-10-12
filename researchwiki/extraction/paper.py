@@ -12,6 +12,7 @@ from .prompts import (
     DEEP_EXTRACTION_SYSTEM,
     paper_analysis_prompt,
     paper_extraction_prompt,
+    extraction_language_rules,
 )
 
 
@@ -21,12 +22,12 @@ def _valid_llm_payload(payload: Any) -> Optional[StructuredPaper]:
     return StructuredPaper.from_dict(payload)
 
 
-def analyze_paper(document: ParsedDocument, llm: LLMClient, purpose: str = "") -> str:
+def analyze_paper(document: ParsedDocument, llm: LLMClient, purpose: str = "", language: str = "zh-CN") -> str:
     if not llm.enabled:
         raise RuntimeError("LLM is required for high-quality paper analysis")
     try:
         return llm.generate(
-            PAPER_ANALYSIS_SYSTEM,
+            PAPER_ANALYSIS_SYSTEM + extraction_language_rules(language),
             paper_analysis_prompt(document.text, purpose),
             temperature=0.1,
         )
@@ -39,12 +40,13 @@ def extract_paper(
     llm: Optional[LLMClient] = None,
     analysis: str = "",
     purpose: str = "",
+    language: str = "zh-CN",
 ) -> StructuredPaper:
     if llm is None or not llm.enabled:
         raise RuntimeError("LLM is required for paper extraction; configure the selected provider's API key")
     try:
         payload = llm.structured(
-            PAPER_EXTRACTION_SYSTEM,
+            PAPER_EXTRACTION_SYSTEM + extraction_language_rules(language),
             paper_extraction_prompt(document.text, analysis=analysis, purpose=purpose),
         )
     except Exception as exc:
@@ -63,6 +65,7 @@ def enrich_paper(
     purpose: str = "",
     quality_mode: str = "standard",
     source_path: Optional[Path] = None,
+    language: str = "zh-CN",
 ) -> StructuredPaper:
     """Optional LLM stage: augment metadata, never erase confirmed local fields.
 
@@ -73,7 +76,7 @@ def enrich_paper(
         raise RuntimeError("Deep extraction requires a configured model API key")
     try:
         payload = llm.structured(
-            DEEP_EXTRACTION_SYSTEM,
+            DEEP_EXTRACTION_SYSTEM + extraction_language_rules(language),
             paper_extraction_prompt(document.text, analysis=analysis, purpose=purpose),
         )
     except Exception as exc:
@@ -101,9 +104,11 @@ def enrich_paper(
     baseline.authors = baseline.authors or deep.authors
     baseline.year = baseline.year or deep.year
     baseline.abstract = baseline.abstract or deep.abstract
+    baseline.abstract_zh = deep.abstract_zh or baseline.abstract_zh
     # Prefer keywords from the author's paper, not model-generated substitutes.
     baseline.methods = deep.methods
     baseline.topics = deep.topics
+    baseline.topic_labels_zh = deep.topic_labels_zh or baseline.topic_labels_zh
     baseline.research_problem = deep.research_problem
     baseline.methodology = deep.methodology
     baseline.experiment_info = deep.experiment_info
