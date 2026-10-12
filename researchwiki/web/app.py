@@ -455,7 +455,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 if source is None:
                     raise HTTPException(status_code=409, detail="Original source file is missing")
                 job = db.enqueue_ingest_job(paper_id, str(source), quality_mode, config.max_ingest_attempts)
-                finally:
+            finally:
                 db.close()
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"action": "queued", "job": job, "source_id": paper_id}
