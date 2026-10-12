@@ -239,6 +239,7 @@ async function openDocument(id) {
       <div class="dialog-actions">
         ${item.raw_name ? `<a class="secondary" target="_blank" rel="noopener" href="/api/documents/${encodeURIComponent(item.id)}/file">查看原始资料 ↗</a>` : ""}
         ${item.status === "INDEXED" && state.modelConfigured && !["PENDING", "RUNNING"].includes(job.status) ? `<button class="primary" id="enrich-document">${extraction.extraction_mode === "basic" ? "使用模型深度分析" : "重新生成中文解读"}</button>` : ""}
+        ${item.status === "INDEXED" && state.modelConfigured ? `<button class="secondary" data-supplement-focus="method">只补方法</button><button class="secondary" data-supplement-focus="experiment">只补实验</button><button class="secondary" data-supplement-focus="overview">只补研究概览</button>` : ""}
         <button class="danger" id="delete-document">移到回收区</button>
         ${item.retryable ? `<button class="secondary" id="retry-document-high">高质量重试</button><button class="primary" id="retry-document">标准重试</button>` : ""}
       </div>`;
@@ -252,6 +253,20 @@ async function openDocument(id) {
         startPolling(id);
       } catch (error) { toast(error.message); }
     });
+    $('[data-supplement-focus]',root).forEach(control=>control.addEventListener("click", async()=>{
+      const focus=control.dataset.supplementFocus;
+      if(!window.confirm("只更新所选知识字段，其余论文内容保持不变。此操作会调用已配置的模型。继续吗？"))return;
+      const old=control.textContent;control.disabled=true;control.textContent="正在补充…";
+      try{
+        await api(`/api/documents/${encodeURIComponent(id)}/supplement?focus=${encodeURIComponent(focus)}`,{
+          method:"POST",headers:{"X-RW-Config-Action":"1"}
+        });
+        toast("字段补充完成；可查看更新后的 Wiki");
+        dialog.close();
+        await Promise.all([loadDocuments(),loadOverview()]);
+      }catch(error){toast(`补充失败：${error.message}`);}
+      finally{control.disabled=false;control.textContent=old;}
+    }));
     $("#retry-document")?.addEventListener("click", async () => {
       try {
         await api(`/api/documents/${encodeURIComponent(id)}/retry?quality_mode=standard`, { method: "POST" });
