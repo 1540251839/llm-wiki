@@ -301,6 +301,8 @@ def ingest(
                 base.authors = base.authors or previous.authors
                 base.year = base.year or previous.year
                 base.abstract = base.abstract or previous.abstract
+                base.abstract_zh = previous.abstract_zh
+                base.topic_labels_zh = dict(previous.topic_labels_zh)
                 base.keywords = base.keywords or previous.keywords
         if mode == "basic":
             paper = base
@@ -309,12 +311,13 @@ def ingest(
             analysis = ""
             if mode == "high":
                 _job_stage(db, job_id, "ANALYZE")
-                analysis = analyze_paper(document, llm=llm, purpose=_purpose(config))
+                analysis = analyze_paper(document, llm=llm, purpose=_purpose(config), language=config.wiki_language)
                 analysis_path = config.root / "data" / "analyses" / (file_hash + ".md")
                 _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
             paper = enrich_paper(
                 document, baseline=base, llm=llm, analysis=analysis,
                 purpose=_purpose(config), quality_mode=mode, source_path=source_path,
+                language=config.wiki_language,
             )
         title_duplicate = db.find_indexed_title_duplicate(paper.title, file_hash)
         if title_duplicate:
@@ -528,18 +531,18 @@ def do_search(config: Config, query: str, top_k: Optional[int] = None) -> List[D
 
 def do_ask(config: Config, question: str, top_k: Optional[int] = None) -> str:
     results = do_search(config, question, top_k=top_k)
-    return answer(question, results, LLMClient(config.llm), context_config=config.retrieval)
+    return answer(question, results, LLMClient(config.llm), context_config={**config.retrieval, "wiki_language": config.wiki_language})
 
 
 def do_ask_with_metadata(config: Config, question: str, top_k: Optional[int] = None) -> Dict[str, Any]:
     results = do_search(config, question, top_k=top_k)
-    return answer_with_metadata(question, results, LLMClient(config.llm), context_config=config.retrieval)
+    return answer_with_metadata(question, results, LLMClient(config.llm), context_config={**config.retrieval, "wiki_language": config.wiki_language})
 
 
 def do_answer_events(config: Config, question: str, top_k: Optional[int] = None):
     results = do_search(config, question, top_k=top_k)
     yield from answer_events(question, results, LLMClient(config.llm),
-                             context_config={**config.retrieval, "top_k": top_k or config.top_k})
+                             context_config={**config.retrieval, "top_k": top_k or config.top_k, "wiki_language": config.wiki_language})
 
 
 def parse_only(
@@ -556,10 +559,11 @@ def parse_only(
     if mode not in {"standard", "high"}:
         raise ValueError("mode must be basic, standard or high")
     client = llm_client or LLMClient(config.llm)
-    analysis = analyze_paper(document, client, purpose=_purpose(config)) if mode == "high" else ""
+    analysis = analyze_paper(document, client, purpose=_purpose(config), language=config.wiki_language) if mode == "high" else ""
     return enrich_paper(
         document, base, client, analysis=analysis,
         purpose=_purpose(config), quality_mode=mode, source_path=path,
+        language=config.wiki_language,
     )
 
 
