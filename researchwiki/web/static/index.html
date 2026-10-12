@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark" />
     <title>ResearchWiki · 可追溯研究知识库</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236ea8ff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='sans-serif' font-size='22' font-weight='700' fill='white'%3ERW%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/assets/styles.css?v=20261012-research-ux-1" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261012-research-ux-2" />
   </head>
   <body>
     <div class="shell">
@@ -157,18 +157,20 @@
             <label class="search-field"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索节点" /></label>
             <div id="graph-type-filters" class="graph-filters"></div>
             <select id="graph-edge-filter" aria-label="图谱关系类型"><option value="">全部关系</option></select>
+            <button class="secondary" id="graph-global">全局图</button>
+            <button class="secondary" id="graph-enable-g6" title="需联网加载 G6，离线仍可使用本地图谱">G6 力导向（可选）</button>
             <button class="secondary" id="graph-zoom-out">－</button>
             <button class="secondary" id="graph-reset">复位</button>
             <button class="secondary" id="graph-zoom-in">＋</button>
             <button class="primary" id="graph-extract">重新抽取</button>
           </div>
           <div class="graph-stats" id="graph-stats"></div>
-          <div class="graph-legend"><span>拖动画布平移 · 滚轮缩放 · 点击节点回查来源</span><span id="graph-visible-count"></span></div>
+          <div class="graph-legend"><span>默认显示一跳关系 · 选择节点可展开邻居 · G6 需主动启用</span><span id="graph-visible-count"></span></div>
           <div class="graph-layout">
-            <article class="panel graph-panel"><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="知识图谱画布"></svg></article>
+            <article class="panel graph-panel"><div id="graph-g6" class="graph-g6 hidden" aria-label="G6 科研关系图"></div><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="科研知识图谱画布"></svg></article>
             <aside class="panel graph-detail" id="graph-detail"><div class="empty-state">选择节点查看字段、证据与连接。</div></aside>
           </div>
-          <article class="panel table-panel retrieval-panel"><div class="section-head"><div><p class="eyebrow">RETRIEVAL OBJECTS</p><h3>检索检查</h3></div><span class="truth-label">当前真实索引</span></div><form id="retrieval-form" class="toolbar"><label class="search-field"><input id="retrieval-input" type="search" required maxlength="500" placeholder="输入关键词，检查问答实际可用的知识页" /></label><button class="primary" type="submit">检索</button></form><div id="retrieval-results" class="retrieval-results"><div class="empty-state">查看命中的主题、得分与证据来源。</div></div></article>
+          <details class="advanced-details"><summary>高级：检查检索索引</summary><article class="panel table-panel retrieval-panel"><div class="section-head"><div><p class="eyebrow">RETRIEVAL OBJECTS</p><h3>检索检查</h3></div><span class="truth-label">当前真实索引</span></div><form id="retrieval-form" class="toolbar"><label class="search-field"><input id="retrieval-input" type="search" required maxlength="500" placeholder="输入关键词，检查问答实际可用的知识页" /></label><button class="primary" type="submit">检索</button></form><div id="retrieval-results" class="retrieval-results"><div class="empty-state">查看命中的主题、得分与证据来源。</div></div></article></details>
         </section>
 
         <section class="view" id="view-reviews">
