@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark" />
     <title>ResearchWiki · 可追溯研究知识库</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236ea8ff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='sans-serif' font-size='22' font-weight='700' fill='white'%3ERW%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/assets/styles.css?v=20261012-zh-first-2" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261013-clean-eval-1" />
   </head>
   <body>
     <div class="shell">
@@ -16,16 +16,11 @@
           <div><strong>ResearchWiki</strong><span>论文知识工作空间</span></div>
         </div>
         <nav aria-label="主导航">
-          <button class="nav-item active" data-view="dashboard" data-short="总览"><span>01</span>知识工作台</button>
-          <button class="nav-item" data-view="documents" data-short="资料"><span>02</span>资料中心</button>
-          <button class="nav-item" data-view="compilation" data-short="编译"><span>03</span>知识编译</button>
-          <button class="nav-item" data-view="wiki" data-short="Wiki"><span>04</span>Wiki 页面</button>
-          <button class="nav-item" data-view="graph" data-short="图谱"><span>05</span>图谱与检索</button>
-          <button class="nav-item" data-view="ask" data-short="问答"><span>06</span>可溯源问答</button>
-          <button class="nav-item" data-view="evaluation" data-short="评估"><span>07</span>固定题库与评估</button>
-          <div class="nav-divider"></div>
-          <button class="nav-item" data-view="reviews" data-short="审核"><span>↳</span>质量审核</button>
-          <button class="nav-item" data-view="settings" data-short="设置"><span>⚙</span>系统设置</button>
+          <button class="nav-item active" data-view="documents" data-short="资料"><span>01</span>资料库</button>
+          <button class="nav-item" data-view="wiki" data-short="Wiki"><span>02</span>知识 Wiki</button>
+          <button class="nav-item" data-view="graph" data-short="图谱"><span>03</span>知识图谱</button>
+          <button class="nav-item" data-view="ask" data-short="问答"><span>04</span>研究问答</button>
+          <button class="nav-item" data-view="settings" data-short="设置"><span>05</span>设置</button>
         </nav>
         <div class="sidebar-foot">
           <div class="system-dot" id="api-dot"></div>
@@ -36,8 +31,8 @@
       <main>
         <header class="topbar">
           <div>
-            <p class="eyebrow" id="view-eyebrow">OVERVIEW</p>
-            <h1 id="view-title">知识工作台</h1>
+            <p class="eyebrow" id="view-eyebrow">DOCUMENT LIBRARY</p>
+            <h1 id="view-title">资料库</h1>
           </div>
           <div class="top-actions">
             <div class="model-chip" id="model-chip">模型状态读取中</div>
@@ -46,7 +41,7 @@
           </div>
         </header>
 
-        <section class="view active" id="view-dashboard">
+        <section class="view" id="view-dashboard">
           <div class="hero panel">
             <div>
               <p class="eyebrow">LOCAL-FIRST · SOURCE-AWARE</p>
@@ -76,7 +71,7 @@
           </article>
         </section>
 
-        <section class="view" id="view-documents">
+        <section class="view active" id="view-documents">
           <div class="toolbar panel">
             <label class="search-field"><span>⌕</span><input id="document-search" type="search" placeholder="搜索标题、作者或文件名" /></label>
             <select id="status-filter" aria-label="处理状态">
@@ -89,6 +84,8 @@
               <option value="FAILED">失败</option>
             </select>
             <select id="type-filter" aria-label="资料类型"><option value="">全部格式</option><option value="pdf">PDF</option><option value="docx">Word</option><option value="md">Markdown</option><option value="txt">TXT</option></select>
+            <button class="secondary" data-jump="compilation">高级：知识编译</button>
+            <button class="secondary" data-jump="reviews">待核对事项</button>
             <button class="primary" id="documents-upload">＋ 导入资料</button>
           </div>
           <article class="panel table-panel">
@@ -105,7 +102,7 @@
         </section>
 
         <section class="view" id="view-compilation">
-          <div class="toolbar panel evaluation-toolbar"><div><p class="eyebrow">KNOWLEDGE COMPILER</p><h3>从原件编译可维护的主题知识</h3></div><button class="primary" id="compile-build">重建知识层</button></div>
+          <div class="toolbar panel compile-toolbar"><div><p class="eyebrow">KNOWLEDGE COMPILER</p><h3>从原件编译可维护的主题知识</h3></div><button class="primary" id="compile-build">重建知识层</button></div>
           <div class="notice">保留原始资料与手工笔记。重建使用已有抽取结果更新主题页、证据索引及图谱；新的论文抽取在资料中心发起。</div>
           <div class="metric-grid" id="compilation-metrics"></div>
           <div class="compile-progress panel" id="compilation-progress" role="status" aria-live="polite">正在读取编译状态…</div>
@@ -123,12 +120,13 @@
               <label class="search-field"><span>⌕</span><input id="wiki-search" type="search" placeholder="搜索 Wiki 标题" /></label>
               <div class="wiki-type-tabs" role="group" aria-label="选择 Wiki 页面类型">
                 <button type="button" class="wiki-type-tab active" data-wiki-type="" aria-pressed="true">全部</button>
-                <button type="button" class="wiki-type-tab" data-wiki-type="paper" aria-pressed="false">Paper<br><small>论文</small></button>
-                <button type="button" class="wiki-type-tab" data-wiki-type="topic" aria-pressed="false">Topic<br><small>主题</small></button>
-                <button type="button" class="wiki-type-tab" data-wiki-type="method" aria-pressed="false">Method<br><small>方法</small></button>
-                <button type="button" class="wiki-type-tab" data-wiki-type="dataset" aria-pressed="false">Dataset<br><small>数据集</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="paper" aria-pressed="false">论文<br><small>Paper</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="topic" aria-pressed="false">主题<br><small>Topic</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="method" aria-pressed="false">方法<br><small>Method</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="dataset" aria-pressed="false">数据集<br><small>Dataset</small></button>
               </div>
               <select id="wiki-type-filter" class="hidden" aria-label="Wiki 页面类型"><option value="">全部</option><option value="paper">论文</option><option value="topic">主题</option><option value="method">方法</option><option value="dataset">数据集</option></select>
+              <p class="wiki-guide" id="wiki-guide">论文解读：读懂一篇论文；研究主题：了解方向；研究方法：理解原理；数据集：了解任务与使用情况。</p>
               <div id="wiki-list" class="wiki-list"></div>
             </article>
             <article class="panel detail-pane" id="wiki-detail">
@@ -159,32 +157,20 @@
             <label class="search-field"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索节点" /></label>
             <div id="graph-type-filters" class="graph-filters"></div>
             <select id="graph-edge-filter" aria-label="图谱关系类型"><option value="">全部关系</option></select>
+            <button class="secondary" id="graph-global">全局图</button>
+            <button class="secondary" id="graph-enable-g6" title="需联网加载 G6，离线仍可使用本地图谱">G6 力导向（可选）</button>
             <button class="secondary" id="graph-zoom-out">－</button>
             <button class="secondary" id="graph-reset">复位</button>
             <button class="secondary" id="graph-zoom-in">＋</button>
             <button class="primary" id="graph-extract">重新抽取</button>
           </div>
           <div class="graph-stats" id="graph-stats"></div>
-          <div class="graph-legend"><span>拖动画布平移 · 滚轮缩放 · 点击节点回查来源</span><span id="graph-visible-count"></span></div>
+          <div class="graph-legend"><span>默认显示一跳关系 · 选择节点可展开邻居 · G6 需主动启用</span><span id="graph-visible-count"></span></div>
           <div class="graph-layout">
-            <article class="panel graph-panel"><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="知识图谱画布"></svg></article>
+            <article class="panel graph-panel"><div id="graph-g6" class="graph-g6 hidden" aria-label="G6 科研关系图"></div><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="科研知识图谱画布"></svg></article>
             <aside class="panel graph-detail" id="graph-detail"><div class="empty-state">选择节点查看字段、证据与连接。</div></aside>
           </div>
-          <article class="panel table-panel retrieval-panel"><div class="section-head"><div><p class="eyebrow">RETRIEVAL OBJECTS</p><h3>检索检查</h3></div><span class="truth-label">当前真实索引</span></div><form id="retrieval-form" class="toolbar"><label class="search-field"><input id="retrieval-input" type="search" required maxlength="500" placeholder="输入关键词，检查问答实际可用的知识页" /></label><button class="primary" type="submit">检索</button></form><div id="retrieval-results" class="retrieval-results"><div class="empty-state">查看命中的主题、得分与证据来源。</div></div></article>
-        </section>
-
-        <section class="view" id="view-evaluation">
-          <div class="toolbar panel evaluation-toolbar">
-            <div><p class="eyebrow">REPLAYABLE QA</p><h3>固定题库与可重放指标</h3></div>
-            <div class="top-actions"><button class="secondary" id="run-baseline">运行基线</button><button class="secondary" id="run-optimized">运行优化版</button><button class="primary" id="run-comparison">运行对照</button></div>
-          </div>
-          <div class="metric-grid" id="evaluation-metrics"></div>
-          <div class="dashboard-grid"><article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">REGRESSION</p><h3>基线与优化对照</h3></div><span class="truth-label" id="evaluation-gate">等待可比运行</span></div><div id="evaluation-comparison"></div></article><article class="panel table-panel"><div class="section-head"><div><p class="eyebrow">RUN HISTORY</p><h3>运行历史</h3></div></div><div id="evaluation-history"></div></article></div>
-          <article class="panel table-panel">
-            <div class="section-head"><div><p class="eyebrow">SELECTED RUN</p><h3>逐题结果</h3></div><div class="top-actions"><span class="truth-label" id="evaluation-run-label">尚未运行</span><button class="secondary" id="replay-evaluation" disabled>重放本次快照</button></div></div>
-            <div id="evaluation-cases" class="evaluation-cases"><div class="empty-state">运行固定题库后显示检索、引用和拒答结果。</div></div>
-          </article>
-          <article class="panel table-panel question-bank"><div class="section-head"><div><p class="eyebrow">FIXED QUESTION SET</p><h3>固定题库</h3></div><span class="truth-label" id="question-bank-count">—</span></div><div id="question-bank"></div></article>
+          <details class="advanced-details"><summary>高级：检查检索索引</summary><article class="panel table-panel retrieval-panel"><div class="section-head"><div><p class="eyebrow">RETRIEVAL OBJECTS</p><h3>检索检查</h3></div><span class="truth-label">当前真实索引</span></div><form id="retrieval-form" class="toolbar"><label class="search-field"><input id="retrieval-input" type="search" required maxlength="500" placeholder="输入关键词，检查问答实际可用的知识页" /></label><button class="primary" type="submit">检索</button></form><div id="retrieval-results" class="retrieval-results"><div class="empty-state">查看命中的主题、得分与证据来源。</div></div></article></details>
         </section>
 
         <section class="view" id="view-reviews">
@@ -199,9 +185,40 @@
 
         <section class="view" id="view-settings">
           <div class="settings-grid">
-            <article class="panel table-panel"><p class="eyebrow">MODEL</p><h3>DeepSeek 连接</h3><div id="settings-model" class="settings-list"></div><button class="primary" id="test-model">执行最小连接测试</button><p id="test-model-result" class="form-message"></p></article>
-            <article class="panel table-panel"><p class="eyebrow">RETRIEVAL</p><h3>检索运行条件</h3><div id="settings-retrieval" class="settings-list"></div></article>
-            <article class="panel table-panel"><p class="eyebrow">BOUNDARY</p><h3>安全边界</h3><div class="notice">密钥只由服务端读取，不会返回浏览器。连接测试会真实调用当前模型，并可能产生少量 API 费用。</div></article>
+            <article class="panel table-panel">
+              <p class="eyebrow">MODEL CONNECTION</p>
+              <h3>配置 DeepSeek API</h3>
+              <p class="muted">基础论文抽取完全离线；深度分析、跨论文综合与模型问答需要 API Key。</p>
+              <div id="settings-model" class="settings-list"></div>
+              <form id="deepseek-key-form" autocomplete="off" class="settings-form">
+                <label for="deepseek-key">DeepSeek API Key</label>
+                <input id="deepseek-key" name="api_key" type="password" placeholder="输入新的 Key（不会显示已有 Key）" autocomplete="new-password" minlength="8" maxlength="512" required />
+                <small>保存在本机私有文件中，不发送给浏览器以外的服务（测试连接时会发送到 DeepSeek）。不要将项目的私密文件加入 Git。</small>
+                <div class="settings-actions">
+                  <button type="submit" class="primary" id="save-model-key">保存密钥</button>
+                  <button type="button" class="secondary" id="test-model">测试连接</button>
+                  <button type="button" class="secondary" id="delete-model-key">删除本地密钥</button>
+                </div>
+              </form>
+              <p id="test-model-result" class="form-message" aria-live="polite"></p>
+            </article>
+            <article class="panel table-panel">
+              <p class="eyebrow">WORKSPACE</p><h3>运行与阅读设置</h3>
+              <div id="settings-retrieval" class="settings-list"></div>
+              <details class="advanced-details">
+                <summary>高级管理</summary>
+                <p class="muted">知识编译与审核用于数据修复；日常阅读不需要操作。</p>
+                <div class="settings-actions">
+                  <button type="button" class="secondary" data-jump="compilation">知识编译</button>
+                  <button type="button" class="secondary" data-jump="reviews">待核对事项</button>
+                </div>
+              </details>
+            </article>
+            <article class="panel table-panel">
+              <p class="eyebrow">PRIVACY</p><h3>数据与安全</h3>
+              <p class="muted">原始论文和 Wiki 保存于本地。模型调用时，所选论文片段可能发送至 DeepSeek。工作台仅供本机使用，不提供公网鉴权。</p>
+              <div class="notice">删除本地 Key 不等于在 DeepSeek 平台撤销。若系统环境变量仍配置了 Key，模型连接可能继续可用。</div>
+            </article>
           </div>
         </section>
       </main>

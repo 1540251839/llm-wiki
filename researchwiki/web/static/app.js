@@ -1,7 +1,7 @@
 const state = {
   health: null,
   overview: null,
-  activeView: "dashboard",
+  activeView: "documents",
   modelConfigured: false,
   pollTimer: null,
   askRequestId: 0,
@@ -12,8 +12,7 @@ const state = {
   askHistory: [],
   currentAnswer: null,
   compilationBusy: false,
-  evaluationRuns: [],
-  graph: { nodes: [], edges: [], visibleTypes: new Set(), scale: 1, panX: 0, panY: 0, dragging: false },
+  graph: { nodes: [], edges: [], visibleTypes: new Set(), scale: 1, panX: 0, panY: 0, dragging: false, center: "", renderer: "svg", g6: null },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -69,7 +68,7 @@ function statusClass(status) {
 }
 
 function showView(name) {
-  if (!document.getElementById(`view-${name}`)) name = "dashboard";
+  if (!document.getElementById(`view-${name}`)) name = "documents";
   state.activeView = name;
   history.replaceState(null, "", `#${name}`);
   $$(".nav-item").forEach((node) => node.classList.toggle("active", node.dataset.view === name));
@@ -81,18 +80,16 @@ function showView(name) {
     wiki: ["COMPILED KNOWLEDGE", "Wiki 页面"],
     graph: ["KNOWLEDGE GRAPH", "图谱与检索"],
     ask: ["SOURCE-AWARE QA", "可溯源问答"],
-    evaluation: ["REPLAYABLE QUALITY", "固定题库与评估"],
     reviews: ["HUMAN REVIEW", "Review 队列"],
     settings: ["RUNTIME", "系统设置"],
   };
-  const label = labels[name] || labels.dashboard;
+  const label = labels[name] || labels.documents;
   $("#view-eyebrow").textContent = label[0];
   $("#view-title").textContent = label[1];
   if (name === "documents") loadDocuments();
   if (name === "compilation") loadCompilation();
   if (name === "wiki") loadWiki();
   if (name === "graph") loadGraph();
-  if (name === "evaluation") loadEvaluation();
   if (name === "reviews") loadReviews();
   if (name === "settings") loadSettings();
   if (name === "ask") renderAskHistory();
@@ -240,6 +237,7 @@ async function openDocument(id) {
       <div class="dialog-actions">
         ${item.raw_name ? `<a class="secondary" target="_blank" rel="noopener" href="/api/documents/${encodeURIComponent(item.id)}/file">查看原始资料 ↗</a>` : ""}
         ${item.status === "INDEXED" && state.modelConfigured && !["PENDING", "RUNNING"].includes(job.status) ? `<button class="primary" id="enrich-document">${extraction.extraction_mode === "basic" ? "使用模型深度分析" : "重新生成中文解读"}</button>` : ""}
+        ${item.status === "INDEXED" && state.modelConfigured ? `<button class="secondary" data-supplement-focus="method">只补方法</button><button class="secondary" data-supplement-focus="experiment">只补实验</button><button class="secondary" data-supplement-focus="overview">只补研究概览</button>` : ""}
         <button class="danger" id="delete-document">移到回收区</button>
         ${item.retryable ? `<button class="secondary" id="retry-document-high">高质量重试</button><button class="primary" id="retry-document">标准重试</button>` : ""}
       </div>`;
@@ -253,6 +251,20 @@ async function openDocument(id) {
         startPolling(id);
       } catch (error) { toast(error.message); }
     });
+    $('[data-supplement-focus]',root).forEach(control=>control.addEventListener("click", async()=>{
+      const focus=control.dataset.supplementFocus;
+      if(!window.confirm("只更新所选知识字段，其余论文内容保持不变。此操作会调用已配置的模型。继续吗？"))return;
+      const old=control.textContent;control.disabled=true;control.textContent="正在补充…";
+      try{
+        await api(`/api/documents/${encodeURIComponent(id)}/supplement?focus=${encodeURIComponent(focus)}`,{
+          method:"POST",headers:{"X-RW-Config-Action":"1"}
+        });
+        toast("字段补充完成；可查看更新后的 Wiki");
+        dialog.close();
+        await Promise.all([loadDocuments(),loadOverview()]);
+      }catch(error){toast(`补充失败：${error.message}`);}
+      finally{control.disabled=false;control.textContent=old;}
+    }));
     $("#retry-document")?.addEventListener("click", async () => {
       try {
         await api(`/api/documents/${encodeURIComponent(id)}/retry?quality_mode=standard`, { method: "POST" });
@@ -369,6 +381,30 @@ function renderMarkdown(text, citations = false, citationScope = "qa") {
   return output.join("");
 }
 
+const wikiQuestions = {
+  paper: "这篇论文研究什么、怎么做、得到什么结果？",
+  topic: "这个方向是什么、有哪些具体研究问题？",
+  method: "这个方法是什么、怎样工作、在哪些研究中使用？",
+  dataset: "这个数据集研究什么任务，哪些论文怎样使用它？",
+};
+
+function renderWikiReading(markdown, type) {
+  const body = String(markdown || "").replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+  const matches = [...body.matchAll(/^##\s+(.+)$/gm)];
+  if (!matches.length) return renderMarkdown(body, true, "wiki");
+  return matches.map((match, index) => {
+    const name = match[1].trim();
+    const start = match.index + match[0].length;
+    const end = matches[index + 1]?.index ?? body.length;
+    const section = body.slice(start, end).trim();
+    const content = renderMarkdown(section, true, "wiki");
+    const supplementary = /^(原文摘要|字段级出处|原文来源|来源证据|证据说明|关键词)/.test(name);
+    return supplementary
+      ? `<details class="wiki-supplement"><summary>${escapeHTML(name)}</summary><div class="prose">${content}</div></details>`
+      : `<section class="wiki-section"><h3>${escapeHTML(name)}</h3><div class="prose">${content}</div></section>`;
+  }).join("");
+}
+
 function sourceFileURL(source) {
   const rawURL = source.file_url || (source.source_id ? `/api/documents/${encodeURIComponent(source.source_id)}/file?inline=true` : "");
   if (!rawURL || !rawURL.startsWith("/api/documents/")) return "";
@@ -396,7 +432,32 @@ async function openWikiPage(button) {
     const sourceCards = (page.sources || []).map((source, index) => { const citationIndex = Number(source.citation_index || index + 1); return `<article class="citation-card wiki-source-card" id="wiki-source-${citationIndex}" tabindex="-1"><span class="citation-number">${citationIndex}</span>${evidenceMarkup(source)}</article>`; }).join("");
     const relatedCards = (page.related || []).map((item) => `<button class="source-card" type="button" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}"><strong>${escapeHTML(item.title)}</strong><br>${escapeHTML(item.type)} · score ${Number(item.score || 0).toFixed(1)}</button>`).join("");
     const backlinks = (page.backlinks || []).map((item) => `<button class="inline-link" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}">↶ ${escapeHTML(item.title)}</button>`).join("");
-    root.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHTML(wikiTypeLabels[page.type] || page.type)} · ${(page.sources || []).length} 个来源</p><h2>${escapeHTML(page.display_title || page.title)}</h2></div></div><div class="wiki-location">${escapeHTML(page.path)}</div>${page.type === "topic" && state.modelConfigured && (page.sources || []).length >= 2 ? '<div class="detail-section"><button class="secondary" id="synthesize-topic" type="button">用模型生成跨论文综合（需复核）</button></div>' : ""}<div class="prose wiki-prose">${renderMarkdown(page.content, true, "wiki")}</div><details class="raw-details"><summary>查看 Markdown 原文</summary><pre class="markdown">${escapeHTML(page.content)}</pre></details><div class="detail-section"><h3>来源证据</h3><div class="evidence-strip">${sourceCards || '<p class="muted">暂无可回查来源，此页需要审核。</p>'}</div></div><div class="detail-section"><h3>反向链接</h3><div class="backlink-list">${backlinks || '<p class="muted">暂无页面引用此主题。</p>'}</div></div>${relatedCards ? `<div class="detail-section"><h3>相关主题</h3><div class="source-list">${relatedCards}</div></div>` : ""}`;
+    const displayTitle = page.display_title || page.title;
+    const nativeTitle = displayTitle !== page.title ? `<p class="wiki-original-title">原始名称：${escapeHTML(page.title)}</p>` : "";
+    const synthesisControl = page.type === "topic" && state.modelConfigured && (page.sources || []).length >= 2
+      ? '<button class="secondary" id="synthesize-topic" type="button">生成跨论文综合（需复核）</button>' : "";
+    root.innerHTML = `
+      <header class="wiki-reading-header">
+        <p class="eyebrow">${escapeHTML(wikiTypeLabels[page.type] || page.type)} · ${(page.sources || []).length} 个来源</p>
+        <h2>${escapeHTML(displayTitle)}</h2>
+        ${nativeTitle}
+        <p class="wiki-reading-question">${escapeHTML(wikiQuestions[page.type] || "阅读并核对相关知识")}</p>
+        ${synthesisControl}
+      </header>
+      <article class="wiki-reading-body">${renderWikiReading(page.content, page.type)}</article>
+      <details class="wiki-supplement">
+        <summary>查看来源、原文定位与证据片段（${(page.sources || []).length}）</summary>
+        <div class="evidence-strip">${sourceCards || '<p class="muted">尚无可回查来源，请先审核。</p>'}</div>
+      </details>
+      <details class="wiki-supplement">
+        <summary>引用它的页面与相关知识</summary>
+        <div class="backlink-list">${backlinks || '<p class="muted">暂无反向链接。</p>'}</div>
+        ${relatedCards ? `<div class="source-list">${relatedCards}</div>` : ""}
+      </details>
+      <details class="wiki-supplement"><summary>高级信息：路径与 Markdown</summary>
+        <p class="wiki-location">${escapeHTML(page.path)}</p>
+        <pre class="markdown">${escapeHTML(page.content)}</pre>
+      </details>`;
     bindWikiLinks(root);
     $("#synthesize-topic", root)?.addEventListener("click", async (event) => {
       const control = event.currentTarget;
@@ -660,72 +721,235 @@ async function submitQuestion(event) {
   }
 }
 
-const graphColors = { PAGE: "#6ea8ff", SOURCE: "#55d6a7", PAGE_TYPE: "#f5bd62", TOPIC: "#9b87f5" };
+const graphColors = {
+  PAPER: "#397fb7", TOPIC: "#8b63b7", METHOD: "#258f84", DATASET: "#d08b3e"
+};
+const graphTypeNames = {PAPER:"论文", TOPIC:"主题", METHOD:"方法", DATASET:"数据集"};
+const graphRelationNames = {
+  STUDIES_TOPIC: "研究主题", REFERENCES_METHOD: "涉及方法",
+  MENTIONS_DATASET: "提及数据集", TESTED_ON: "测试关联（待核对）",
+  TRAINED_ON: "训练关联（待核对）", VALIDATED_ON: "验证关联（待核对）", RELATED: "相关"
+};
 
 function graphTransform() {
   const graph = state.graph;
   return `translate(${graph.panX} ${graph.panY}) translate(500 340) scale(${graph.scale}) translate(-500 -340)`;
 }
 
-function renderGraph() {
-  const svg = $("#graph-canvas");
+function stableHash(value) {
+  let h = 2166136261;
+  for (const char of String(value)) { h ^= char.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+function graphPositions(visible, edges) {
   const graph = state.graph;
-  const query = $("#graph-search").value.trim().toLocaleLowerCase();
-  const visible = graph.nodes.filter((node) => graph.visibleTypes.has(node.type));
   const positions = new Map();
-  const groups = [...new Set(visible.map((node) => node.type))].sort();
-  groups.forEach((type, groupIndex) => {
-    const items = visible.filter((node) => node.type === type);
-    const radius = 105 + groupIndex * 95;
-    items.forEach((node, index) => {
-      const angle = (Math.PI * 2 * index / Math.max(1, items.length)) - Math.PI / 2 + groupIndex * .3;
-      positions.set(node.id, { x: 500 + Math.cos(angle) * radius, y: 340 + Math.sin(angle) * radius });
-    });
+  visible.forEach((node, index) => {
+    const seed = stableHash(node.id);
+    const angle = ((seed % 997) / 997) * Math.PI * 2;
+    const radius = 110 + (Math.floor(seed / 997) % 180);
+    positions.set(node.id, {x: 500 + Math.cos(angle) * radius, y: 340 + Math.sin(angle) * radius});
   });
-  const relation = $("#graph-edge-filter").value;
-  const edges = graph.edges.filter((edge) => positions.has(edge.source) && positions.has(edge.target) && (!relation || edge.semantic === relation));
-  $("#graph-visible-count").textContent = `${visible.length} 个可见节点 · ${edges.length} 条关系${query ? ` · ${visible.filter((node) => node.name.toLocaleLowerCase().includes(query)).length} 个匹配` : ""}`;
-  const edgeMarkup = edges.map((edge) => { const a = positions.get(edge.source); const b = positions.get(edge.target); return `<line class="graph-edge" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" data-semantic="${escapeHTML(edge.semantic)}" />`; }).join("");
-  const nodeMarkup = visible.map((node) => { const p = positions.get(node.id); const match = !query || node.name.toLocaleLowerCase().includes(query); const radius = node.type === "PAGE" ? 8 : 6; return `<g class="graph-node ${match ? "match" : "dim"}" data-graph-node="${escapeHTML(node.id)}" role="button" tabindex="0" aria-label="${escapeHTML(node.type + " " + node.name)}" transform="translate(${p.x} ${p.y})"><circle r="${radius}" fill="${graphColors[node.type] || graphColors.TOPIC}"/><text y="${radius + 13}" text-anchor="middle">${escapeHTML(node.name.slice(0, 24))}</text></g>`; }).join("");
-  svg.innerHTML = visible.length ? `<g id="graph-stage" transform="${graphTransform()}">${edgeMarkup}${nodeMarkup}</g>` : '<text x="500" y="340" text-anchor="middle" fill="currentColor">暂无可见节点，请先编译知识或调整筛选</text>';
-  $$('[data-graph-node]', svg).forEach((node) => {
-    node.addEventListener("click", () => selectGraphNode(node.dataset.graphNode));
-    node.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectGraphNode(node.dataset.graphNode); } });
+  if (graph.center && positions.has(graph.center)) positions.set(graph.center, {x:500,y:340});
+  const width = 950, height = 630;
+  for (let step = 0; step < 64; step++) {
+    const forces = new Map(visible.map(node => [node.id, {x:0,y:0}]));
+    for (let i = 0; i < visible.length; i++) {
+      const a = positions.get(visible[i].id);
+      for (let j = i + 1; j < visible.length; j++) {
+        const b = positions.get(visible[j].id);
+        const dx = a.x-b.x, dy = a.y-b.y, d2 = dx*dx+dy*dy+120;
+        const force = Math.min(28, 14000/d2);
+        const len = Math.sqrt(d2);
+        forces.get(visible[i].id).x += dx/len*force;
+        forces.get(visible[i].id).y += dy/len*force;
+        forces.get(visible[j].id).x -= dx/len*force;
+        forces.get(visible[j].id).y -= dy/len*force;
+      }
+    }
+    for (const edge of edges) {
+      const u = positions.get(edge.source),v = positions.get(edge.target);
+      if (!u || !v) continue;
+      const dx=v.x-u.x, dy=v.y-u.y, distance=Math.hypot(dx,dy)||1;
+      const force=(distance-155)*0.014;
+      forces.get(edge.source).x += dx/distance*force;
+      forces.get(edge.source).y += dy/distance*force;
+      forces.get(edge.target).x -= dx/distance*force;
+      forces.get(edge.target).y -= dy/distance*force;
+    }
+    visible.forEach(node => {
+      if (node.id === graph.center) return;
+      const p=positions.get(node.id), f=forces.get(node.id);
+      p.x=Math.min(width,Math.max(45,p.x+Math.max(-18,Math.min(18,f.x+(500-p.x)*0.004))));
+      p.y=Math.min(height,Math.max(42,p.y+Math.max(-18,Math.min(18,f.y+(340-p.y)*0.004))));
+    });
+  }
+  return positions;
+}
+
+function visibleResearchGraph() {
+  const graph=state.graph;
+  const nodes=graph.nodes.filter(n=>graph.visibleTypes.has(n.type));
+  const ids=new Set(nodes.map(n=>n.id));
+  const kind=$("#graph-edge-filter").value;
+  const edges=graph.edges.filter(e=>ids.has(e.source)&&ids.has(e.target)&&(!kind||e.semantic===kind));
+  return {nodes,edges};
+}
+
+function renderGraph() {
+  const graph=state.graph;
+  const {nodes,edges}=visibleResearchGraph();
+  const query=$("#graph-search").value.trim().toLocaleLowerCase();
+  $("#graph-visible-count").textContent=`${nodes.length} 个科研对象 · ${edges.length} 条关系`;
+  if (graph.renderer === "g6" && window.G6?.Graph) {
+    renderG6ResearchGraph(nodes,edges);
+    return;
+  }
+  $("#graph-canvas").classList.remove("hidden");
+  $("#graph-g6").classList.add("hidden");
+  const svg=$("#graph-canvas");
+  const positions=graphPositions(nodes,edges);
+  const edgeMarkup=edges.map(edge=>{
+    const a=positions.get(edge.source),b=positions.get(edge.target);
+    return `<line class="graph-edge" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}">
+      <title>${escapeHTML(graphRelationNames[edge.semantic]||edge.semantic)}</title></line>`;
+  }).join("");
+  const nodeMarkup=nodes.map(node=>{
+    const p=positions.get(node.id),match=!query||node.name.toLowerCase().includes(query);
+    const selected=graph.selectedId===node.id;
+    return `<g class="graph-node ${match?"match":"dim"} ${selected?"selected":""}"
+      data-graph-node="${escapeHTML(node.id)}" role="button" tabindex="0"
+      aria-label="${escapeHTML((graphTypeNames[node.type]||node.type)+" "+node.name)}"
+      transform="translate(${p.x} ${p.y})"><circle r="${selected?13:10}"
+      fill="${graphColors[node.type]||"#778899"}"/>
+      <text y="27" text-anchor="middle">${escapeHTML(node.name.slice(0,20))}</text>
+      <title>${escapeHTML(node.name)}</title></g>`;
+  }).join("");
+  svg.innerHTML=nodes.length?`<g id="graph-stage" transform="${graphTransform()}">${edgeMarkup}${nodeMarkup}</g>`
+    : '<text x="500" y="340" text-anchor="middle" fill="currentColor">尚无科研关系，请先导入并编译论文</text>';
+  $$('[data-graph-node]',svg).forEach(node=>{
+    node.addEventListener("click",()=>selectGraphNode(node.dataset.graphNode));
+    node.addEventListener("keydown",e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();selectGraphNode(node.dataset.graphNode);}});
   });
 }
 
-async function selectGraphNode(id) {
-  const node = state.graph.nodes.find((item) => item.id === id);
-  if (!node) return;
-  const connections = state.graph.edges.filter((edge) => edge.source === id || edge.target === id);
-  state.graph.selectedId = id;
-  $$('[data-graph-node]').forEach((element) => element.classList.toggle("selected", element.dataset.graphNode === id));
-  const sourceId = node.source_id || (node.type === "SOURCE" ? node.id.replace(/^source:/, "") : "");
-  $("#graph-detail").innerHTML = `<p class="eyebrow">${escapeHTML(node.type)}</p><h3>${escapeHTML(node.name)}</h3><div class="settings-list"><div><span>稳定 ID</span><code>${escapeHTML(node.id)}</code></div><div><span>连接数</span><strong>${connections.length}</strong></div><div><span>来源定位</span><strong>${node.page_number ? `第 ${node.page_number} 页 · ${node.char_start}-${node.char_end}` : "元数据对象"}</strong></div><div><span>证据类型</span><strong>${escapeHTML(node.confidence || "metadata")}</strong></div></div>${node.page_id ? `<button class="primary" data-open-graph-page="${node.page_id}">打开 Wiki 页面</button>` : ""}${sourceId ? `<button class="secondary" data-graph-source="${escapeHTML(sourceId)}">查看来源资料</button>` : ""}<div id="graph-node-evidence"></div><div class="detail-section"><h3>关系</h3>${connections.slice(0, 24).map((edge) => { const peer = edge.source === id ? edge.target : edge.source; const other = state.graph.nodes.find((item) => item.id === peer); return `<button class="graph-connection" data-connected-node="${escapeHTML(peer)}"><code>${escapeHTML(edge.semantic)}</code><span>${edge.source === id ? "→" : "←"} ${escapeHTML(other?.name || peer)}</span></button>`; }).join("") || "<p>无连接</p>"}</div>`;
-  $('[data-open-graph-page]')?.addEventListener("click", () => goToWikiPage(node.page_id, node.name));
-  $('[data-graph-source]')?.addEventListener("click", () => openDocument(sourceId));
-  $$('[data-connected-node]').forEach((button) => button.addEventListener("click", () => selectGraphNode(button.dataset.connectedNode)));
-  if (node.page_id) {
-    try { const page = await api(`/api/wiki/pages/${node.page_id}`); if (state.graph.selectedId === id) $("#graph-node-evidence").innerHTML = `<div class="detail-section"><h3>来源证据</h3>${(page.sources || []).map(evidenceMarkup).join("") || '<p class="muted">暂无来源证据</p>'}</div>`; }
-    catch (error) { if (state.graph.selectedId === id) $("#graph-node-evidence").textContent = `证据加载失败：${error.message}`; }
+function renderG6ResearchGraph(nodes,edges) {
+  const graph=state.graph;
+  const host=$("#graph-g6");
+  $("#graph-canvas").classList.add("hidden");
+  host.classList.remove("hidden");
+  if (graph.g6) { graph.g6.destroy(); graph.g6=null; }
+  try {
+    const instance=new window.G6.Graph({
+      container:host,
+      autoFit:"view",
+      data:{
+        nodes:nodes.map(n=>({id:n.id,style:{size:26,fill:graphColors[n.type],
+          labelText:n.name.length>22?n.name.slice(0,21)+"…":n.name,
+          labelPlacement:"bottom",labelFontSize:11}})),
+        edges:edges.map(e=>({id:e.id,source:e.source,target:e.target,
+          style:{stroke:"#98a6b5",lineWidth:1.1}}))
+      },
+      layout:{type:"d3-force",animation:false,manyBody:{strength:-250},
+        link:{distance:145},x:{},y:{}},
+      behaviors:["drag-canvas","zoom-canvas","drag-element"],
+    });
+    graph.g6=instance;
+    instance.on("node:click",(ev)=>{const id=ev.target?.id||ev.item?.id;if(id)selectGraphNode(id);});
+    const result=instance.render();
+    if(result?.catch)result.catch(()=>{graph.renderer="svg";renderGraph();toast("G6 渲染失败，已切换本地图谱");});
+  } catch(error) {
+    graph.renderer="svg";
+    toast("G6 不可用，已切换本地图谱");
+    renderGraph();
   }
 }
 
-async function loadGraph() {
-  const svg = $("#graph-canvas");
-  svg.innerHTML = `<text x="500" y="340" text-anchor="middle" fill="#8d98ad">正在读取图谱…</text>`;
+async function enableG6ResearchGraph() {
+  if (!window.G6?.Graph) {
+    const btn=$("#graph-enable-g6");btn.disabled=true;btn.textContent="正在加载 G6…";
+    try {
+      await new Promise((resolve,reject)=>{
+        const tag=document.createElement("script");
+        tag.src="https://cdn.jsdelivr.net/npm/@antv/g6@5.1.1/dist/g6.min.js";
+        tag.async=true;tag.onload=resolve;tag.onerror=reject;
+        document.head.appendChild(tag);
+      });
+    } catch { toast("无法加载 G6，仍可使用本地布局");btn.disabled=false;btn.textContent="G6 力导向（可选）";return; }
+    btn.disabled=false;btn.textContent="G6 力导向";
+  }
+  state.graph.renderer=state.graph.renderer==="g6"?"svg":"g6";
+  $("#graph-enable-g6").textContent=state.graph.renderer==="g6"?"本地布局":"G6 力导向";
+  renderGraph();
+}
+
+async function selectGraphNode(id) {
+  const graph=state.graph;
+  const node=graph.nodes.find(item=>item.id===id);
+  if (!node) return;
+  graph.selectedId=id;
+  const connections=graph.edges.filter(edge=>edge.source===id||edge.target===id);
+  if (graph.renderer==="svg") renderGraph();
+  $("#graph-detail").innerHTML=`<p class="eyebrow">${escapeHTML(graphTypeNames[node.type]||node.type)}</p>
+    <h3>${escapeHTML(node.name)}</h3>
+    <p class="muted">与 ${connections.length} 个知识关系相连。点击可展开更多关联。</p>
+    <div class="settings-actions">
+      <button class="primary" id="graph-expand-node">展开一跳关系</button>
+      ${node.page_id?`<button class="secondary" data-open-graph-page="${node.page_id}">阅读 Wiki</button>`:""}
+    </div>
+    <div class="detail-section"><h3>关联对象</h3>
+      ${connections.slice(0,30).map(edge=>{
+        const peer=edge.source===id?edge.target:edge.source;
+        const linked=graph.nodes.find(item=>item.id===peer);
+        const type=graphRelationNames[edge.semantic]||edge.semantic;
+        return `<button class="graph-connection" data-connected-node="${escapeHTML(peer)}">
+          <code>${escapeHTML(type)}</code>
+          <span>${escapeHTML(linked?.name||peer)}</span></button>`;
+      }).join("")||"<p>当前视图没有关联对象。</p>"}
+    </div>
+    <details class="advanced-details" id="graph-node-evidence"><summary>原始证据与定位</summary>
+      <p class="muted">打开后查看原始论文页码和摘录。</p></details>`;
+  $("#graph-expand-node")?.addEventListener("click",()=>loadGraph(id));
+  $('[data-open-graph-page]')?.addEventListener("click",()=>goToWikiPage(node.page_id,node.original_name||node.name));
+  $$('[data-connected-node]').forEach(button=>button.addEventListener("click",()=>selectGraphNode(button.dataset.connectedNode)));
+  if (node.page_id) {
+    try {
+      const page=await api(`/api/wiki/pages/${node.page_id}`);
+      if (graph.selectedId===id)$("#graph-node-evidence").innerHTML=
+        `<summary>原始证据与定位</summary>${(page.sources||[]).map(evidenceMarkup).join("")||'<p class="muted">尚无来源证据。</p>'}`;
+    } catch { /* The graph remains useful if source preview cannot load. */ }
+  }
+}
+
+async function loadGraph(center = "") {
+  const svg=$("#graph-canvas");
+  if(graph.renderer!=="g6")svg.innerHTML='<text x="500" y="340" text-anchor="middle" fill="currentColor">正在读取科研关系…</text>';
   try {
-    const value = await api("/api/graph?limit=2000");
-    state.graph.nodes = value.nodes || [];
-    state.graph.edges = value.edges || [];
-    state.graph.visibleTypes = new Set(state.graph.nodes.map((node) => node.type));
-    $("#graph-edge-filter").innerHTML = '<option value="">全部关系</option>' + [...new Set(state.graph.edges.map((edge) => edge.semantic))].sort().map((semantic) => `<option value="${escapeHTML(semantic)}">${escapeHTML(semantic)}</option>`).join("");
-    const types = Object.entries(value.node_types || {});
-    $("#graph-type-filters").innerHTML = types.map(([type, count]) => `<label><input type="checkbox" data-graph-type="${escapeHTML(type)}" checked />${escapeHTML(type)} <small>${count}</small></label>`).join("");
-    $$('[data-graph-type]').forEach((input) => input.addEventListener("change", () => { input.checked ? state.graph.visibleTypes.add(input.dataset.graphType) : state.graph.visibleTypes.delete(input.dataset.graphType); renderGraph(); }));
-    $("#graph-stats").innerHTML = [renderMetric("NODE", value.stats.nodes, "稳定节点"), renderMetric("EDGE", value.stats.edges, "有效关系"), renderMetric("HASH", String(value.digest || "").slice(0, 10), "确定性产物"), renderMetric("MODE", "LOCAL", "本地规则抽取")].join("");
-    renderGraph();
-  } catch (error) { svg.innerHTML = `<text x="500" y="340" text-anchor="middle" fill="#ff7d8b">${escapeHTML(error.message)}</text>`; }
+    const value=await api(`/api/graph/research?center=${encodeURIComponent(center)}&depth=1&limit=220`);
+    state.graph.nodes=value.nodes||[];
+    state.graph.edges=value.edges||[];
+    state.graph.center=value.center||"";
+    state.graph.visibleTypes=new Set(state.graph.nodes.map(node=>node.type));
+    const semantics=[...new Set(state.graph.edges.map(edge=>edge.semantic))].sort();
+    $("#graph-edge-filter").innerHTML='<option value="">全部关系</option>'+
+      semantics.map(key=>`<option value="${escapeHTML(key)}">${escapeHTML(graphRelationNames[key]||key)}</option>`).join("");
+    const types=Object.entries(value.node_types||{});
+    $("#graph-type-filters").innerHTML=types.map(([type,count])=>
+      `<label><input type="checkbox" data-graph-type="${escapeHTML(type)}" checked />${escapeHTML(graphTypeNames[type]||type)} <small>${count}</small></label>`).join("");
+    $$('[data-graph-type]').forEach(input=>input.addEventListener("change",()=>{
+      input.checked?state.graph.visibleTypes.add(input.dataset.graphType):state.graph.visibleTypes.delete(input.dataset.graphType);
+      renderGraph();
+    }));
+    $("#graph-stats").innerHTML=[
+      renderMetric("OBJECTS",value.stats?.nodes??0,"知识对象总数"),
+      renderMetric("LINKS",value.stats?.edges??0,"科研对象关系"),
+      renderMetric("VISIBLE",value.nodes?.length??0,"当前视图"),
+      renderMetric("VIEW",center==="__all__"?"GLOBAL":"LOCAL","关系范围"),
+    ].join("");
+    if (!center && state.graph.nodes.length) selectGraphNode(state.graph.center);
+    else renderGraph();
+  } catch(error) {svg.innerHTML=`<text x="500" y="340" text-anchor="middle" fill="currentColor">${escapeHTML(error.message)}</text>`;}
 }
 
 async function searchRetrieval(event) {
@@ -748,82 +972,44 @@ async function reextractGraph() {
   finally { button.disabled = false; }
 }
 
-const evalMetricLabels = { completion: "回答完成", retrieval_hit: "检索命中", evidence_coverage: "证据覆盖", citation_validity: "引用有效", faithfulness: "答案忠实", honest_refusal: "拒答诚实", robustness: "输入鲁棒" };
-const metricPercent = (value) => typeof value === "number" ? `${Math.round(value * 100)}%` : "不适用";
-
-function renderEvaluation(value) {
-  state.selectedEvaluationId = value.id;
-  $("#replay-evaluation").disabled = !value.id;
-  const metrics = value.metrics || {};
-  $("#evaluation-metrics").innerHTML = renderMetric("SCORE", metrics.score ?? "—", "当前题库综合分") + Object.entries(evalMetricLabels).map(([key, label]) => renderMetric(key.replaceAll("_", " ").toUpperCase(), metricPercent(metrics[key]), label)).join("");
-  $("#evaluation-run-label").textContent = `${value.profile} · ${value.question_count} 题 · ${formatDate(value.finished_at)}`;
-  $("#evaluation-cases").innerHTML = (value.cases || []).map((item, index) => {
-    const applicable = Object.entries(evalMetricLabels).filter(([key]) => typeof item.metrics?.[key] === "number" || typeof item.metrics?.[key] === "boolean");
-    const score = applicable.length ? Math.round(applicable.reduce((sum, [key]) => sum + Number(item.metrics[key]), 0) / applicable.length * 100) : null;
-    return `<details class="evaluation-case"><summary><div><span class="badge ${score === null ? "warning" : score >= 100 ? "ok" : "warning"}">${escapeHTML(item.category || item.mode || "评估")}</span><strong>${escapeHTML(item.question)}</strong></div><span class="case-score">${score ?? "—"}</span></summary><div class="case-content"><div class="case-metrics">${Object.entries(evalMetricLabels).map(([key, label]) => { const metric = item.metrics?.[key]; return `<span class="badge ${metric == null ? "neutral" : Number(metric) === 1 ? "ok" : "warning"}">${label} · ${metric == null ? "不适用" : metricPercent(Number(metric))}</span>`; }).join("")}</div><div class="prose">${renderMarkdown(item.answer || "没有答案")}</div><div class="case-sources">${(item.sources || []).map((source) => `<button class="inline-link" data-wiki-title="${escapeHTML(source.title)}">[${escapeHTML(source.citation_index || "?")}] ${escapeHTML(source.title)}</button>`).join("")}</div>${item.notes || item.reason ? `<p class="muted">${escapeHTML(item.notes || item.reason)}</p>` : ""}<button class="secondary" data-replay-case="${index}">在问答工作台重放 →</button></div></details>`;
-  }).join("") || '<div class="empty-state">该运行没有逐题结果。</div>';
-  bindWikiLinks($("#evaluation-cases"));
-  $$('[data-replay-case]').forEach((button) => button.addEventListener("click", () => {
-    showView("ask"); $("#ask-input").value = value.cases[Number(button.dataset.replayCase)].question; $("#ask-input").focus();
-    toast("问题已填入，可提交以重新检索当前知识库");
-  }));
-}
-
-function renderComparison(baseline, optimized, gate = null) {
-  const root = $("#evaluation-comparison");
-  if (!baseline || !optimized) { root.innerHTML = '<div class="empty-state">运行同一题库的基线与优化版，观察变化与逐题退步。</div>'; return; }
-  const a = baseline.metrics || {}; const b = optimized.metrics || {};
-  const comparable = gate || (a.corpus_fingerprint && a.corpus_fingerprint === b.corpus_fingerprint && a.question_set_hash === b.question_set_hash && a.rules_version === b.rules_version);
-  if (!comparable) { root.innerHTML = '<div class="notice">历史运行的知识库快照或题库不同，不能直接比较。点击“运行对照”生成同一快照下的两组结果。</div>'; $("#evaluation-gate").textContent = "需要同快照对照"; return; }
-  $("#evaluation-gate").textContent = gate ? (gate.passed ? "回归门通过" : `${gate.regressions?.length || 0} 项退步`) : "同快照对照";
-  root.innerHTML = `<div class="table-wrap"><table class="comparison-table"><thead><tr><th>指标</th><th>基线</th><th>优化版</th><th>变化</th></tr></thead><tbody>${Object.entries(evalMetricLabels).map(([key, label]) => { const delta = typeof a[key] === "number" && typeof b[key] === "number" ? (b[key] - a[key]) * 100 : null; return `<tr><td>${label}</td><td>${metricPercent(a[key])}</td><td>${metricPercent(b[key])}</td><td class="${delta < 0 ? "negative" : "positive"}">${delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`}</td></tr>`; }).join("")}</tbody></table></div>${gate?.regressions?.length ? `<div class="notice">${gate.regressions.map((item) => `${escapeHTML(item.question_id)} · ${escapeHTML(evalMetricLabels[item.metric] || item.metric)} ${metricPercent(item.baseline)} → ${metricPercent(item.optimized)}`).join("<br>")}</div>` : ""}<p class="aside-note">固定题库上的规则评估。分数不代表开放问题的通用准确率。</p>`;
-}
-
-async function loadEvaluation() {
-  try {
-    const [runs, questions] = await Promise.all([api("/api/evaluation/runs?limit=20"), api("/api/evaluation/questions")]);
-    state.evaluationRuns = runs.items;
-    $("#evaluation-history").innerHTML = runs.items.map((run) => `<button class="evaluation-run" data-evaluation-run="${run.id}"><div><strong>${escapeHTML(run.profile)} <span>#${run.id}</span></strong><small>${escapeHTML(formatDate(run.finished_at))} · ${run.question_count} 题</small></div><span>${run.metrics?.score ?? "—"}</span></button>`).join("") || '<div class="empty-state">暂无运行记录。</div>';
-    $$('[data-evaluation-run]').forEach((button) => button.addEventListener("click", async () => { try { renderEvaluation(await api(`/api/evaluation/runs/${button.dataset.evaluationRun}`)); } catch (error) { toast(error.message); } }));
-    $("#question-bank-count").textContent = `${questions.total} 题`;
-    $("#question-bank").innerHTML = (questions.items || []).map((item) => `<div class="question-bank-item"><code>${escapeHTML(item.id)}</code><span class="badge neutral">${escapeHTML(item.category || item.type || "知识检索")}</span><div><strong>${escapeHTML(item.question)}</strong><small>${item.expected_mode === "clarification" ? "预期：先请求澄清，不猜测用户意图" : item.expected_no_evidence || item.expected_refusal || item.should_refuse || item.expected_mode === "no_evidence" ? "预期：没有充分证据，明确拒答" : `预期：${escapeHTML((item.expected_source_titles || item.expected_titles || item.expected_terms || []).join("、") || "按证据回答")}`}</small></div></div>`).join("");
-    if (runs.items.length) renderEvaluation(await api(`/api/evaluation/runs/${runs.items[0].id}`));
-    renderComparison(runs.items.find((run) => run.profile === "baseline"), runs.items.find((run) => run.profile === "optimized"));
-  } catch (error) { $("#evaluation-cases").innerHTML = `<div class="error-state">评估读取失败：${escapeHTML(error.message)}</div>`; }
-}
-
-async function runEvaluation(profile) {
-  const buttons = [$("#run-baseline"), $("#run-optimized"), $("#run-comparison")]; buttons.forEach((button) => { button.disabled = true; });
-  $("#evaluation-run-label").textContent = `正在运行 ${profile === "compare" ? "同快照对照" : profile}…`;
-  try {
-    const value = await api(profile === "compare" ? "/api/evaluation/compare" : `/api/evaluation/run?profile=${profile}`, { method: "POST" });
-    await loadEvaluation();
-    if (profile === "compare") { renderEvaluation(value.optimized); renderComparison(value.baseline, value.optimized, value.gate || value.comparison?.gate); toast(value.gate?.passed ? "对照完成，回归门通过" : "对照完成，请检查逐题变化"); }
-    else { renderEvaluation(value); toast(`评估完成：${value.metrics.score}`); }
-  } catch (error) { $("#evaluation-run-label").textContent = "运行失败"; toast(`评估失败：${error.message}`); }
-  finally { buttons.forEach((button) => { button.disabled = false; }); }
-}
-
-async function replayEvaluation() {
-  if (!state.selectedEvaluationId) return;
-  const button = $("#replay-evaluation"); button.disabled = true;
-  const runId = state.selectedEvaluationId;
-  button.textContent = "正在重放…";
-  try {
-    const result = await api(`/api/evaluation/runs/${runId}/replay`, { method: "POST" });
-    await loadEvaluation();
-    renderEvaluation(result);
-    toast(`快照 #${runId} 重放完成：${result.metrics?.score ?? "—"} 分`);
-  } catch (error) { toast(`无法重放：${error.message}`); }
-  finally { button.disabled = false; button.textContent = "重放本次快照"; }
-}
-
 async function loadSettings() {
   try {
     const value = await api("/api/settings");
-    $("#settings-model").innerHTML = `<div><span>Provider</span><strong>${escapeHTML(value.llm.provider)}</strong></div><div><span>Model</span><strong>${escapeHTML(value.llm.model)}</strong></div><div><span>API 地址</span><code>${escapeHTML(value.llm.base_url)}</code></div><div><span>密钥</span><strong>${value.llm.configured ? "已配置（已脱敏）" : "未配置"}</strong></div>`;
-    $("#settings-retrieval").innerHTML = `<div><span>Top K</span><strong>${value.retrieval.top_k}</strong></div><div><span>图关系扩展</span><strong>${value.retrieval.graph_expansion ? "开启" : "关闭"}</strong></div><div><span>向量检索</span><strong>${value.retrieval.vector_enabled ? "开启" : "关闭"}</strong></div><div><span>上下文预算</span><strong>${value.retrieval.max_context_chars} 字符</strong></div><div><span>Wiki 输出语言</span><strong>${value.wiki?.language === "zh-CN" ? "简体中文优先" : "English"}</strong></div><div><span>原文与英文术语</span><strong>保留</strong></div>`;
+    const configured = Boolean(value.credentials?.configured || value.llm?.configured);
+    $("#settings-model").innerHTML = `<div><span>提供方</span><strong>${escapeHTML(value.llm.provider)}</strong></div><div><span>当前模型</span><strong>${escapeHTML(value.llm.model)}</strong></div><div><span>连接状态</span><strong>${configured ? "已配置密钥" : "未配置密钥"}</strong></div><div><span>本机保存</span><strong>${value.credentials?.stored_locally ? "已保存（不显示密钥）" : "无本地凭据文件"}</strong></div>`;
+    $("#settings-retrieval").innerHTML = `<div><span>知识语言</span><strong>${value.wiki?.language === "zh-CN" ? "中文优先 · 英文原文保留" : "English"}</strong></div><div><span>索引</span><strong>SQLite FTS5</strong></div><div><span>可选向量检索</span><strong>${value.retrieval.vector_enabled ? "开启" : "关闭"}</strong></div>`;
   } catch (error) { toast(`设置读取失败：${error.message}`); }
+}
+
+async function saveDeepSeekKey(event) {
+  event.preventDefault();
+  const input = $("#deepseek-key");
+  const control = $("#save-model-key");
+  const result = $("#test-model-result");
+  control.disabled = true;
+  result.textContent = "正在保存本地密钥…";
+  try {
+    await api("/api/settings/deepseek-key", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-RW-Config-Action": "1"},
+      body: JSON.stringify({api_key: input.value.trim()}),
+    });
+    input.value = "";
+    result.textContent = "已保存在本机。可点击“测试连接”验证有效性。";
+    await Promise.all([loadSettings(), loadHealth()]);
+  } catch (error) { result.textContent = `保存失败：${error.message}`; }
+  finally { control.disabled = false; }
+}
+
+async function clearDeepSeekKey() {
+  if (!window.confirm("确定删除这台电脑上保存的 DeepSeek Key 吗？这不会在 DeepSeek 平台撤销该密钥。")) return;
+  const result = $("#test-model-result");
+  try {
+    await api("/api/settings/deepseek-key", {method: "DELETE", headers: {"X-RW-Config-Action": "1"}});
+    $("#deepseek-key").value = "";
+    result.textContent = "本地密钥已清除。如果环境变量中仍有 Key，模型仍可能已配置。";
+    await Promise.all([loadSettings(), loadHealth()]);
+  } catch (error) { result.textContent = `删除失败：${error.message}`; }
 }
 
 async function testModel() {
@@ -866,22 +1052,22 @@ function bindEvents() {
   $$('[data-question]').forEach((button) => button.addEventListener("click", () => { $("#ask-input").value = button.dataset.question; $("#ask-input").focus(); }));
   $("#refresh-reviews").addEventListener("click", loadReviews);
   $("#graph-search").addEventListener("input", renderGraph);
+  $("#graph-global").addEventListener("click",()=>loadGraph("__all__"));
+  $("#graph-enable-g6").addEventListener("click",enableG6ResearchGraph);
   $("#graph-edge-filter").addEventListener("change", renderGraph);
   $("#graph-extract").addEventListener("click", reextractGraph);
-  $("#graph-zoom-in").addEventListener("click", () => { state.graph.scale = Math.min(2.4, state.graph.scale * 1.18); renderGraph(); });
-  $("#graph-zoom-out").addEventListener("click", () => { state.graph.scale = Math.max(.45, state.graph.scale / 1.18); renderGraph(); });
-  $("#graph-reset").addEventListener("click", () => { state.graph.scale = 1; state.graph.panX = 0; state.graph.panY = 0; renderGraph(); });
+  $("#graph-zoom-in").addEventListener("click", () => { if(state.graph.g6&&state.graph.renderer==="g6")state.graph.g6.zoomBy?.(1.18);else{state.graph.scale=Math.min(2.4,state.graph.scale*1.18);renderGraph();} });
+  $("#graph-zoom-out").addEventListener("click", () => { if(state.graph.g6&&state.graph.renderer==="g6")state.graph.g6.zoomBy?.(.85);else{state.graph.scale=Math.max(.45,state.graph.scale/1.18);renderGraph();} });
+  $("#graph-reset").addEventListener("click", () => { if(state.graph.g6&&state.graph.renderer==="g6")state.graph.g6.fitView?.();else{state.graph.scale=1;state.graph.panX=0;state.graph.panY=0;renderGraph();} });
   $("#graph-canvas").addEventListener("wheel", (event) => { event.preventDefault(); state.graph.scale = Math.max(.45, Math.min(2.4, state.graph.scale * (event.deltaY < 0 ? 1.1 : .9))); renderGraph(); }, { passive: false });
   $("#graph-canvas").addEventListener("pointerdown", (event) => { if (event.target.closest?.('[data-graph-node]')) return; state.graph.dragging = true; event.currentTarget.setPointerCapture?.(event.pointerId); });
   $("#graph-canvas").addEventListener("pointermove", (event) => { if (!state.graph.dragging) return; state.graph.panX += event.movementX; state.graph.panY += event.movementY; $("#graph-stage")?.setAttribute("transform", graphTransform()); });
   $("#graph-canvas").addEventListener("pointerup", () => { state.graph.dragging = false; });
   $("#graph-canvas").addEventListener("pointercancel", () => { state.graph.dragging = false; });
-  $("#run-baseline").addEventListener("click", () => runEvaluation("baseline"));
-  $("#run-optimized").addEventListener("click", () => runEvaluation("optimized"));
-  $("#run-comparison").addEventListener("click", () => runEvaluation("compare"));
-  $("#replay-evaluation").addEventListener("click", replayEvaluation);
   $("#retrieval-form").addEventListener("submit", searchRetrieval);
   $("#test-model").addEventListener("click", testModel);
+  $("#deepseek-key-form").addEventListener("submit", saveDeepSeekKey);
+  $("#delete-model-key").addEventListener("click", clearDeepSeekKey);
   $("#theme-toggle").addEventListener("click", () => { const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; document.documentElement.dataset.theme = theme; try { localStorage.setItem("researchwiki.theme", theme); } catch (_) {} });
   $("#file-input").addEventListener("change", () => { $("#drop-label").textContent = $("#file-input").files[0]?.name || "拖入文件，或点击选择"; });
   const zone = $("#drop-zone");
@@ -896,7 +1082,7 @@ async function boot() {
   bindEvents();
   await loadHealth();
   await loadOverview();
-  if (location.hash) showView(location.hash.slice(1));
+  showView(location.hash ? location.hash.slice(1) : "documents");
   renderAskHistory();
 }
 

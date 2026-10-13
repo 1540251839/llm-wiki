@@ -1,13 +1,7 @@
 import io
-import json
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from researchwiki.config import load_config
-from researchwiki.evaluation.runner import DEFAULT_QUESTIONS, METRIC_NAMES, _case_metrics, compare_profiles, replay_evaluation, run_evaluation
-from researchwiki.index.database import Database
 from researchwiki.llm.client import LLMClient
 from researchwiki.qa.engine import answer_events, answer_with_metadata
 from researchwiki.qa.retrieval import weighted_rank
@@ -92,67 +86,6 @@ class TraceableQATest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "before completion"):
                 list(client.stream_generate("system", "user"))
 
-
-class EvaluationReplayTest(unittest.TestCase):
-    def _seed(self, root):
-        config = load_config(root)
-        database = Database(config.db_path)
-        try:
-            source = page()
-            database.conn.execute("INSERT INTO wiki_pages(id,title,type,path) VALUES(1,'ELAM','dataset','wiki/datasets/ELAM.md')")
-            database.conn.execute("INSERT INTO chunks(page_id,content) VALUES(1,?)", (source["content"],))
-            database.conn.commit()
-        finally:
-            database.close()
-        return config
-
-    def test_replay_freezes_corpus_and_does_not_mutate_production_content(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config = self._seed(Path(directory))
-            questions = [{"id": "q1", "question": "ELAM queries?", "expected_source_titles": ["ELAM"], "expected_terms": ["85", "50"]}]
-            first = run_evaluation(config, questions=questions)
-            database = Database(config.db_path)
-            try:
-                old = database.conn.execute("SELECT content FROM chunks").fetchone()[0]
-                self.assertIn("85", old)
-                database.conn.execute("UPDATE chunks SET content='ELAM now contains 1000 queries.'")
-                database.conn.commit()
-            finally:
-                database.close()
-            replay = replay_evaluation(config, first["id"])
-            fresh = run_evaluation(config, questions=questions, persist=False)
-            self.assertEqual(first["metrics"]["corpus_fingerprint"], replay["metrics"]["corpus_fingerprint"])
-            self.assertEqual(first["cases"][0]["answer"], replay["cases"][0]["answer"])
-            self.assertNotEqual(first["metrics"]["corpus_fingerprint"], fresh["metrics"]["corpus_fingerprint"])
-            self.assertLess(fresh["metrics"]["evidence_coverage"], first["metrics"]["evidence_coverage"])
-            self.assertEqual(replay["metrics"]["model_calls"], 0)
-
-    def test_fixed_cases_missing_corpus_and_na_metrics_are_honest(self):
-        self.assertGreaterEqual(len(DEFAULT_QUESTIONS), 16)
-        with tempfile.TemporaryDirectory() as directory:
-            result = run_evaluation(load_config(directory), persist=False)
-        self.assertEqual(result["metrics"]["retrieval_hit"], 0.0)
-        self.assertLess(result["metrics"]["score"], 80)
-        vague = next(case for case in result["cases"] if case["question_id"] == "vague")
-        self.assertIsNone(vague["metrics"]["retrieval_hit"])
-        self.assertIsNone(vague["metrics"]["citation_validity"])
-        self.assertEqual(vague["mode"], "clarification")
-
-    def test_compare_uses_identical_snapshot_and_replay_clock(self):
-        with tempfile.TemporaryDirectory() as directory:
-            config = self._seed(Path(directory))
-            compared = compare_profiles(config, persist=False)
-            repeated = compare_profiles(config, persist=False)
-        self.assertEqual(compared, repeated)
-        self.assertEqual(compared["baseline"]["metrics"]["corpus_fingerprint"], compared["optimized"]["metrics"]["corpus_fingerprint"])
-        self.assertEqual(set(compared["gate"]["metric_deltas"]), set(METRIC_NAMES))
-
-    def test_faithfulness_checks_claim_text_not_just_source_presence(self):
-        result = answer_with_metadata("ELAM queries?", [page()])
-        result["claims"] = [{"text": "ELAM has 9999 queries.", "citation_index": 1}]
-        metrics = _case_metrics(result, {"expected_terms": ["85"]})
-        self.assertEqual(metrics["faithfulness"], 0.0)
-        self.assertEqual(metrics["evidence_coverage"], 0.0)
 
 
 if __name__ == "__main__":
