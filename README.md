@@ -114,7 +114,6 @@ Wiki 页面、引用、内链：Markdown + manifest.json + index.md + log.md
 图谱节点与边 / 检索对象：page_sources + FTS5 + links + 可选向量
     ↓
 可溯源问答：上下文预算 + SSE delta + [n] 引用 + 原文定位
-    ↓
 ```
 
 资料状态依次为 `UPLOADED → EXTRACTING → EXTRACTED → WIKI_CREATED → INDEXED`。队列另外记录 `PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED` 和当前 stage。任一步失败都会保留原文、错误和尝试次数；Web 服务重启时，未领取的任务继续执行，已中断任务转为可重试失败。
