@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from ..wiki.manager import WikiManager, parse_frontmatter, wiki_links
+from .source_text import source_chunks
 
 
 _CJK_TOKEN = re.compile(r"[\u3400-\u9fff]+")
@@ -79,6 +80,7 @@ class Database:
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.fts_available = True
+        self.source_fts_available = True
         self._init_schema()
 
     def close(self) -> None:
@@ -107,6 +109,16 @@ class Database:
         CREATE TABLE IF NOT EXISTS chunks (
           id INTEGER PRIMARY KEY AUTOINCREMENT, page_id INTEGER NOT NULL,
           content TEXT NOT NULL, source TEXT
+        );
+        CREATE TABLE IF NOT EXISTS source_chunks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_id TEXT NOT NULL,
+          page_number INTEGER NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          char_start INTEGER NOT NULL,
+          char_end INTEGER NOT NULL,
+          content TEXT NOT NULL,
+          UNIQUE(source_id, page_number, chunk_index)
         );
         CREATE TABLE IF NOT EXISTS sources (
           id TEXT PRIMARY KEY, sha256 TEXT NOT NULL UNIQUE,
@@ -165,6 +177,7 @@ class Database:
         CREATE INDEX IF NOT EXISTS idx_pages_type ON wiki_pages(type);
         CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias);
         CREATE INDEX IF NOT EXISTS idx_sources_sha256 ON sources(sha256);
+        CREATE INDEX IF NOT EXISTS idx_source_chunks_source ON source_chunks(source_id,page_number);
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON ingest_jobs(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_jobs_source ON ingest_jobs(source_id, created_at);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_source
@@ -211,6 +224,13 @@ class Database:
             self.conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(title, type, path, content, page_id UNINDEXED)")
         except sqlite3.OperationalError:
             self.fts_available = False
+        try:
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts USING fts5("
+                "content, content='source_chunks', content_rowid='id')"
+            )
+        except sqlite3.OperationalError:
+            self.source_fts_available = False
         self.conn.commit()
 
     def upsert_paper(self, paper_id: str, title: str, authors: List[str], year: Optional[int], source_path: str, raw_path: str, status: str, error_message: str = "") -> None:
@@ -254,6 +274,116 @@ class Database:
             (source_id, source_id, original_name, original_path, raw_path, media_type, size_bytes),
         )
         self.conn.commit()
+
+    def count_source_chunks(self, source_id: str) -> int:
+        return int(self.conn.execute(
+            "SELECT count(*) FROM source_chunks WHERE source_id=?", (source_id,)
+        ).fetchone()[0])
+
+    def index_source_chunks(self, source_id: str, pages: Iterable[Any]) -> int:
+        """Replace one source's exact page slices (never calls an LLM).
+
+        A separate source index is deliberately independent of generated Wiki
+        pages. Deep enrichment cannot silently hide unquoted source content.
+        """
+        entries = list(source_chunks(pages))
+        if len(entries) > 20000:
+            raise ValueError("Source exceeds the 20000 chunk index limit")
+        with self.conn:
+            previous = self.conn.execute(
+                "SELECT id,content FROM source_chunks WHERE source_id=?", (source_id,)
+            ).fetchall()
+            if self.source_fts_available:
+                for row in previous:
+                    self.conn.execute(
+                        "INSERT INTO source_chunks_fts(source_chunks_fts,rowid,content) VALUES('delete',?,?)",
+                        (row["id"], row["content"]),
+                    )
+            self.conn.execute("DELETE FROM source_chunks WHERE source_id=?", (source_id,))
+            for item in entries:
+                cursor = self.conn.execute(
+                    """INSERT INTO source_chunks(source_id,page_number,chunk_index,char_start,char_end,content)
+                       VALUES(?,?,?,?,?,?)""",
+                    (source_id, item["page_number"], item["chunk_index"],
+                     item["char_start"], item["char_end"], item["content"]),
+                )
+                if self.source_fts_available:
+                    self.conn.execute(
+                        "INSERT INTO source_chunks_fts(rowid,content) VALUES(?,?)",
+                        (cursor.lastrowid, item["content"]),
+                    )
+        return len(entries)
+
+    def delete_source_chunks(self, source_id: str) -> None:
+        with self.conn:
+            rows = self.conn.execute(
+                "SELECT id,content FROM source_chunks WHERE source_id=?", (source_id,)
+            ).fetchall()
+            if self.source_fts_available:
+                for row in rows:
+                    self.conn.execute(
+                        "INSERT INTO source_chunks_fts(source_chunks_fts,rowid,content) VALUES('delete',?,?)",
+                        (row["id"], row["content"]),
+                    )
+            self.conn.execute("DELETE FROM source_chunks WHERE source_id=?", (source_id,))
+
+    def search_source_chunks(self, query: str, limit: int = 8, source_id: str = "") -> List[Dict[str, Any]]:
+        """Retrieve immutable source excerpts independently of Wiki generation."""
+        text = query.strip()
+        if not text:
+            return []
+        limit = max(1, min(40, limit))
+        conditions = ["p.status='INDEXED'", "s.deleted_at IS NULL"]
+        params: List[Any] = []
+        if source_id:
+            conditions.append("c.source_id=?")
+            params.append(source_id)
+        where = " AND ".join(conditions)
+        prefix = (
+            "SELECT c.source_id,c.page_number,c.chunk_index,c.char_start,c.char_end,"
+            "c.content,p.title,s.original_name "
+            "FROM source_chunks c "
+            "JOIN papers p ON p.id=c.source_id "
+            "JOIN sources s ON s.id=c.source_id "
+        )
+        rows = []
+        if self.source_fts_available:
+            terms = _fallback_search_terms(text)
+            if terms:
+                expression = " OR ".join(_fts_quote(t) for t in terms[:24])
+                try:
+                    rows = self.conn.execute(
+                        prefix + "JOIN source_chunks_fts f ON f.rowid=c.id "
+                        "WHERE source_chunks_fts MATCH ? AND " + where +
+                        " ORDER BY bm25(source_chunks_fts),c.source_id,c.page_number,c.chunk_index LIMIT ?",
+                        [expression, *params, limit],
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+        # CJK queries can be substrings of tokens created by unicode61. A LIKE
+        # fallback also works on SQLite builds without the FTS5 extension.
+        if not rows:
+            rows = self.conn.execute(
+                prefix + "WHERE " + where + " AND c.content LIKE ? "
+                "ORDER BY c.source_id,c.page_number,c.chunk_index LIMIT ?",
+                [*params, "%" + text + "%", limit],
+            ).fetchall()
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            content = item.pop("content")
+            at = content.casefold().find(text.casefold())
+            if at < 0:
+                at = next((content.casefold().find(t.casefold()) for t in _fallback_search_terms(text)
+                           if t and content.casefold().find(t.casefold()) >= 0), 0)
+            begin = max(0, at - 120)
+            end = min(len(content), begin + 600)
+            item["char_start"] = int(item["char_start"]) + begin
+            item["char_end"] = int(row["char_start"]) + end
+            item["excerpt"] = content[begin:end]
+            item["locator"] = f"page:{item['page_number']}#chars={item['char_start']}-{item['char_end']}"
+            result.append(item)
+        return result
 
     def get_source(self, source_id: str) -> Optional[Dict[str, Any]]:
         row = self.conn.execute("SELECT * FROM sources WHERE id=? LIMIT 1", (source_id,)).fetchone()
