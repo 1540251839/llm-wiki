@@ -297,6 +297,9 @@ def ingest(
         )
         _job_stage(db, job_id, "PARSE")
         document = parse_file(source_path)
+        # Index the complete original text before optional LLM extraction.
+        # This is a local SQLite operation and works even without an API key.
+        indexed_source_chunks = db.index_source_chunks(file_hash, document.pages)
         db.update_paper_status(file_hash, "EXTRACTING")
         _job_stage(db, job_id, "EXTRACT")
         base = extract_basic(document, source_path=source_path, workspace_root=config.root)
@@ -491,6 +494,7 @@ def delete_source(config: Config, source_id: str, delete_raw: bool = True) -> Di
             + "\n",
         )
         db.mark_source_deleted(source_id)
+        db.delete_source_chunks(source_id)
         stats = db.rebuild(WikiManager(config.wiki_root))
         _refresh_evidence_locators(config, db)
         extract_graph(db, wiki_root=config.wiki_root)
@@ -520,6 +524,23 @@ def rebuild(config: Config) -> Dict[str, int]:
     db = Database(config.db_path)
     try:
         stats = db.rebuild(WikiManager(config.wiki_root))
+        # Backfill pre-upgrade documents only once; no model calls or Wiki edits.
+        backfilled = 0
+        for row in db.conn.execute(
+            "SELECT id,raw_path,source_path FROM papers WHERE status='INDEXED'"
+        ).fetchall():
+            if db.count_source_chunks(str(row["id"])):
+                continue
+            original = Path(str(row["raw_path"] or row["source_path"] or ""))
+            if not original.is_file() or _hash_file(original) != str(row["id"]):
+                continue
+            try:
+                db.index_source_chunks(str(row["id"]), parse_file(original).pages)
+                backfilled += 1
+            except (OSError, ValueError, RuntimeError):
+                # Broken or scanned legacy inputs should not break Wiki rebuild.
+                continue
+        stats["original_sources_backfilled"] = backfilled
         stats["evidence_locators"] = _refresh_evidence_locators(config, db)
         graph_stats = extract_graph(db, wiki_root=config.wiki_root)
         stats["graph_nodes"] = int(graph_stats["stats"]["nodes"])

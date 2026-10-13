@@ -36,6 +36,15 @@ def extraction_context(document: ParsedDocument, budget: int = 65000) -> str:
     No inference is made about the role of a dataset mentioned in a section.
     Retains page labels so a model can return exact quotes for later verification.
     """
+    # A paper that already fits the model budget should be read in full.
+    # The previous implementation applied per-section caps even to short
+    # papers, discarding sections that were not recognized as headings.
+    if len(document.text or "") <= budget - 1024:
+        if document.pages:
+            return "\n\n".join(
+                f"[PAGE {page.number}]\n{page.text}" for page in document.pages if page.text.strip()
+            )
+        return document.text
     passages: Dict[str, List[str]] = defaultdict(list)
     current = "front"
     pages = document.pages or []

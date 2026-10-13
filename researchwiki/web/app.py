@@ -341,6 +341,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             if paper and str(paper.get("status")) == "DELETED":
                 paper = None
             pages = db.list_pages_for_source(paper_id) if paper else []
+            source_chunk_count = db.count_source_chunks(paper_id) if paper else 0
             job = db.latest_ingest_job(paper_id) if paper else None
             reviews = [value for value in db.list_reviews(status="OPEN", limit=500) if value.get("source_id") == paper_id]
         finally:
@@ -353,6 +354,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             for page in pages
         ]
         result["reviews"] = reviews
+        result["original_text_indexed"] = source_chunk_count > 0
+        result["original_text_chunks"] = source_chunk_count
         return result
 
     @app.post("/api/documents", status_code=202)
@@ -827,6 +830,33 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             "generated_at": value["generated_at"],
             "digest": value["digest"],
         }
+
+    @app.get("/api/source-search")
+    def search_original_sources(
+        q: str = Query(min_length=1, max_length=500),
+        top_k: int = Query(default=8, ge=1, le=30),
+        source_id: str = Query(default="", max_length=64),
+    ) -> Dict[str, Any]:
+        """Search the original page text without requiring any LLM or Wiki claim."""
+        if source_id and not re.fullmatch(r"[a-f0-9]{64}", source_id):
+            raise HTTPException(status_code=422, detail="Invalid source ID")
+        db = Database(config.db_path)
+        try:
+            matched = db.search_source_chunks(q, limit=top_k, source_id=source_id)
+        finally:
+            db.close()
+        items = []
+        for row in matched:
+            page = int(row["page_number"])
+            items.append({
+                "source_id": row["source_id"], "title": row["title"],
+                "filename": Path(str(row.get("original_name") or "")).name,
+                "page_number": page,
+                "locator": row["locator"], "char_start": row["char_start"],
+                "char_end": row["char_end"], "excerpt": row["excerpt"],
+                "file_url": f"/api/documents/{row['source_id']}/file?inline=true#page={page}",
+            })
+        return {"items": items, "total": len(items), "source_kind": "original_text"}
 
     @app.get("/api/search")
     def search_wiki(q: str = Query(min_length=1, max_length=500), top_k: int = Query(default=8, ge=1, le=20)) -> Dict[str, Any]:
