@@ -70,6 +70,7 @@ class ResearchWikiWebTest(unittest.TestCase):
                 response = client.post(
                     "/api/documents",
                     files={"file": ("sample.txt", payload, "text/plain")},
+                    data={"quality_mode": "standard"},
                 )
                 self.assertEqual(response.status_code, 202)
                 paper_id = hashlib.sha256(payload).hexdigest()

@@ -224,12 +224,13 @@ async function openDocument(id) {
         <div class="detail-cell"><span>原始文件</span><strong>${escapeHTML(item.raw_name || item.source_name || "—")}</strong></div>
         <div class="detail-cell"><span>文档 ID</span><strong title="${escapeHTML(item.id)}">${escapeHTML(item.id.slice(0, 16))}…</strong></div>
         <div class="detail-cell"><span>队列阶段</span><strong>${escapeHTML(job.stage || "—")}</strong></div>
-        <div class="detail-cell"><span>处理模式 / 尝试</span><strong>${escapeHTML(job.quality_mode || "standard")} · ${escapeHTML(job.attempts || 0)}/${escapeHTML(job.max_attempts || 0)}</strong></div>
+        <div class="detail-cell"><span>处理模式 / 尝试</span><strong>${escapeHTML(extraction.extraction_mode || job.quality_mode || "basic")} · ${escapeHTML(job.attempts || 0)}/${escapeHTML(job.max_attempts || 0)}</strong></div>
       </div>
       ${reasons.length ? `<div class="notice">${reasons.map(escapeHTML).join("；")}</div>` : ""}
       ${item.error_message || job.error_message || job.last_error ? `<div class="detail-section"><h3>失败日志</h3><pre class="failure-log">${escapeHTML(item.error_message || job.error_message || job.last_error)}</pre></div>` : ""}
       <div class="detail-section"><h3>结构化抽取</h3>
         <p>${escapeHTML(extraction.abstract || "暂无摘要")}</p>
+        <p><strong>关键词：</strong>${escapeHTML((extraction.keywords || []).join("、") || "—")}</p>
         <p><strong>方法：</strong>${escapeHTML((extraction.methods || []).map((x) => x.name || x).join("、") || "—")}</p>
         <p><strong>数据集：</strong>${escapeHTML((extraction.datasets || []).map((x) => x.name || x).join("、") || "—")}</p>
         <p><strong>主题：</strong>${escapeHTML((extraction.topics || []).join("、") || "—")}</p>
@@ -238,10 +239,20 @@ async function openDocument(id) {
       ${reviews.length ? `<div class="detail-section"><h3>待审核</h3><div class="review-list">${reviews.map((review) => `<div class="review-item"><div><span class="badge ${review.severity === "error" ? "error" : "warning"}">${escapeHTML(review.kind)}</span><p>${escapeHTML(review.message)}</p></div><button class="row-action" data-resolve-review="${review.id}">标为已处理</button></div>`).join("")}</div></div>` : ""}
       <div class="dialog-actions">
         ${item.raw_name ? `<a class="secondary" target="_blank" rel="noopener" href="/api/documents/${encodeURIComponent(item.id)}/file">查看原始资料 ↗</a>` : ""}
+        ${item.status === "INDEXED" && state.modelConfigured && !["PENDING", "RUNNING"].includes(job.status) ? `<button class="primary" id="enrich-document">${extraction.extraction_mode === "basic" ? "使用模型深度分析" : "重新生成中文解读"}</button>` : ""}
         <button class="danger" id="delete-document">移到回收区</button>
         ${item.retryable ? `<button class="secondary" id="retry-document-high">高质量重试</button><button class="primary" id="retry-document">标准重试</button>` : ""}
       </div>`;
     $$('[data-related-page]', root).forEach((button) => button.addEventListener("click", () => goToWikiPage(button.dataset.relatedPage, button.dataset.relatedTitle)));
+    $("#enrich-document")?.addEventListener("click", async () => {
+      if (!window.confirm("将调用模型更新自动生成的知识内容；原始英文和人工笔记会保留。继续吗？")) return;
+      try {
+        await api(`/api/documents/${encodeURIComponent(id)}/enrich?quality_mode=standard`, { method: "POST" });
+        toast("已加入深度分析队列");
+        dialog.close();
+        startPolling(id);
+      } catch (error) { toast(error.message); }
+    });
     $("#retry-document")?.addEventListener("click", async () => {
       try {
         await api(`/api/documents/${encodeURIComponent(id)}/retry?quality_mode=standard`, { method: "POST" });
@@ -279,13 +290,25 @@ async function openDocument(id) {
   }
 }
 
+const wikiTypeLabels = {paper: "论文", topic: "主题", method: "方法", dataset: "数据集"};
+
+function setWikiType(type) {
+  $("#wiki-type-filter").value = type;
+  $$(".wiki-type-tab").forEach((button) => {
+    const selected = button.dataset.wikiType === type;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  loadWiki();
+}
+
 async function loadWiki() {
   const q = $("#wiki-search").value.trim();
   try {
     const value = await api(`/api/wiki/pages?q=${encodeURIComponent(q)}&type=${encodeURIComponent($("#wiki-type-filter").value)}&limit=500`);
     $("#wiki-count").textContent = value.items.length < value.total ? `${value.items.length} / ${value.total} 页` : `${value.total} 页`;
     const root = $("#wiki-list");
-    root.innerHTML = value.items.map((item) => `<button class="wiki-item" data-page-id="${item.id}" data-page-title="${escapeHTML(item.title)}">${escapeHTML(item.title)}<small>${escapeHTML(item.type)} · ${escapeHTML(item.path)}</small></button>`).join("") || `<div class="empty-state">没有页面。</div>`;
+    root.innerHTML = value.items.map((item) => `<button class="wiki-item" data-page-id="${item.id}" data-page-title="${escapeHTML(item.title)}">${escapeHTML(item.display_title || item.title)}<small>${escapeHTML(wikiTypeLabels[item.type] || item.type)} · ${escapeHTML(item.path)}</small></button>`).join("") || `<div class="empty-state">没有页面。</div>`;
     $$('[data-page-id]', root).forEach((button) => button.addEventListener("click", () => openWikiPage(button)));
   } catch (error) { toast(`Wiki 加载失败：${error.message}`); }
 }
@@ -293,7 +316,7 @@ async function loadWiki() {
 async function goToWikiPage(id, title = "") {
   $("#document-dialog")?.close();
   $("#wiki-search").value = title;
-  $("#wiki-type-filter").value = "";
+  setWikiType("");
   showView("wiki");
   await loadWiki();
   const button = $(`[data-page-id="${CSS.escape(String(id))}"]`, $("#wiki-list"));
@@ -373,8 +396,18 @@ async function openWikiPage(button) {
     const sourceCards = (page.sources || []).map((source, index) => { const citationIndex = Number(source.citation_index || index + 1); return `<article class="citation-card wiki-source-card" id="wiki-source-${citationIndex}" tabindex="-1"><span class="citation-number">${citationIndex}</span>${evidenceMarkup(source)}</article>`; }).join("");
     const relatedCards = (page.related || []).map((item) => `<button class="source-card" type="button" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}"><strong>${escapeHTML(item.title)}</strong><br>${escapeHTML(item.type)} · score ${Number(item.score || 0).toFixed(1)}</button>`).join("");
     const backlinks = (page.backlinks || []).map((item) => `<button class="inline-link" data-related-page="${item.id}" data-related-title="${escapeHTML(item.title)}">↶ ${escapeHTML(item.title)}</button>`).join("");
-    root.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHTML(page.type)} · ${(page.sources || []).length} 个来源</p><h2>${escapeHTML(page.title)}</h2></div></div><div class="wiki-location">${escapeHTML(page.path)}</div><div class="prose wiki-prose">${renderMarkdown(page.content, true, "wiki")}</div><details class="raw-details"><summary>查看 Markdown 原文</summary><pre class="markdown">${escapeHTML(page.content)}</pre></details><div class="detail-section"><h3>来源证据</h3><div class="evidence-strip">${sourceCards || '<p class="muted">暂无可回查来源，此页需要审核。</p>'}</div></div><div class="detail-section"><h3>反向链接</h3><div class="backlink-list">${backlinks || '<p class="muted">暂无页面引用此主题。</p>'}</div></div>${relatedCards ? `<div class="detail-section"><h3>相关主题</h3><div class="source-list">${relatedCards}</div></div>` : ""}`;
+    root.innerHTML = `<div class="section-head"><div><p class="eyebrow">${escapeHTML(wikiTypeLabels[page.type] || page.type)} · ${(page.sources || []).length} 个来源</p><h2>${escapeHTML(page.display_title || page.title)}</h2></div></div><div class="wiki-location">${escapeHTML(page.path)}</div>${page.type === "topic" && state.modelConfigured && (page.sources || []).length >= 2 ? '<div class="detail-section"><button class="secondary" id="synthesize-topic" type="button">用模型生成跨论文综合（需复核）</button></div>' : ""}<div class="prose wiki-prose">${renderMarkdown(page.content, true, "wiki")}</div><details class="raw-details"><summary>查看 Markdown 原文</summary><pre class="markdown">${escapeHTML(page.content)}</pre></details><div class="detail-section"><h3>来源证据</h3><div class="evidence-strip">${sourceCards || '<p class="muted">暂无可回查来源，此页需要审核。</p>'}</div></div><div class="detail-section"><h3>反向链接</h3><div class="backlink-list">${backlinks || '<p class="muted">暂无页面引用此主题。</p>'}</div></div>${relatedCards ? `<div class="detail-section"><h3>相关主题</h3><div class="source-list">${relatedCards}</div></div>` : ""}`;
     bindWikiLinks(root);
+    $("#synthesize-topic", root)?.addEventListener("click", async (event) => {
+      const control = event.currentTarget;
+      control.disabled = true;
+      control.textContent = "正在比较已提取的论文…";
+      try {
+        await api(`/api/wiki/topics/${encodeURIComponent(page.id)}/synthesize`, { method: "POST" });
+        toast("跨论文综合已保存到 Topic 页面，请核对原始证据");
+        await openWikiPage(button);
+      } catch (error) { toast(`跨论文综合失败：${error.message}`); control.disabled = false; control.textContent = "用模型生成跨论文综合（需复核）"; }
+    });
     $$('[data-wiki-citation]', root).forEach((citation) => citation.addEventListener("click", () => { const card = $(`#wiki-source-${citation.dataset.wikiCitation}`, root); if (!card) return toast("该编号没有对应的来源证据"); $$(".wiki-source-card", root).forEach((item) => item.classList.remove("highlight")); card.classList.add("highlight"); card.scrollIntoView({ behavior: "smooth", block: "center" }); card.focus({ preventScroll: true }); }));
   } catch (error) { root.innerHTML = `<div class="empty-state">读取失败：${escapeHTML(error.message)}</div>`; }
 }
@@ -382,19 +415,15 @@ async function openWikiPage(button) {
 function openUpload() {
   const message = $("#upload-message");
   const submit = $("#upload-submit");
-  if (!state.modelConfigured) {
-    message.textContent = "尚未配置 DEEPSEEK_API_KEY。浏览与搜索可用，但新资料无法抽取。";
-    submit.disabled = true;
-  } else {
-    message.textContent = "";
-    submit.disabled = false;
-  }
+  const offline = $("#quality-mode").value === "basic";
+  message.textContent = offline ? "基础抽取在本机执行，不调用模型。" : state.modelConfigured ? "深度抽取将调用已配置的模型服务。" : "未配置模型密钥，请改用基础抽取。";
+  submit.disabled = !offline && !state.modelConfigured;
   $("#upload-dialog").showModal();
 }
 
 async function submitUpload(event) {
   event.preventDefault();
-  if (!state.modelConfigured) return;
+  if (!state.modelConfigured && $("#quality-mode").value !== "basic") return;
   const file = $("#file-input").files[0];
   if (!file) return;
   const button = $("#upload-submit");
@@ -435,9 +464,10 @@ function startPolling(id) {
     try {
       const item = await api(`/api/documents/${encodeURIComponent(id)}`);
       await Promise.all([loadDocuments(), loadOverview()]);
-      if (["INDEXED", "FAILED"].includes(item.status)) {
-        if (item.status === "INDEXED") toast("资料处理完成");
-        if (item.status === "FAILED") toast("资料处理失败，请查看详情");
+      const jobStatus = item.job?.status || "";
+      if (jobStatus === "FAILED") { toast(item.status === "INDEXED" ? "深度分析失败；已有 Wiki 已保留" : "资料处理失败，请查看详情"); return; }
+      if (jobStatus === "SUCCEEDED" || (!jobStatus && ["INDEXED", "FAILED"].includes(item.status))) {
+        toast(item.status === "INDEXED" ? "资料处理完成" : "资料处理失败，请查看详情");
         return;
       }
     } catch (_) { /* A later poll may recover from a transient local error. */ }
@@ -792,7 +822,7 @@ async function loadSettings() {
   try {
     const value = await api("/api/settings");
     $("#settings-model").innerHTML = `<div><span>Provider</span><strong>${escapeHTML(value.llm.provider)}</strong></div><div><span>Model</span><strong>${escapeHTML(value.llm.model)}</strong></div><div><span>API 地址</span><code>${escapeHTML(value.llm.base_url)}</code></div><div><span>密钥</span><strong>${value.llm.configured ? "已配置（已脱敏）" : "未配置"}</strong></div>`;
-    $("#settings-retrieval").innerHTML = `<div><span>Top K</span><strong>${value.retrieval.top_k}</strong></div><div><span>图关系扩展</span><strong>${value.retrieval.graph_expansion ? "开启" : "关闭"}</strong></div><div><span>向量检索</span><strong>${value.retrieval.vector_enabled ? "开启" : "关闭"}</strong></div><div><span>上下文预算</span><strong>${value.retrieval.max_context_chars} 字符</strong></div>`;
+    $("#settings-retrieval").innerHTML = `<div><span>Top K</span><strong>${value.retrieval.top_k}</strong></div><div><span>图关系扩展</span><strong>${value.retrieval.graph_expansion ? "开启" : "关闭"}</strong></div><div><span>向量检索</span><strong>${value.retrieval.vector_enabled ? "开启" : "关闭"}</strong></div><div><span>上下文预算</span><strong>${value.retrieval.max_context_chars} 字符</strong></div><div><span>Wiki 输出语言</span><strong>${value.wiki?.language === "zh-CN" ? "简体中文优先" : "English"}</strong></div><div><span>原文与英文术语</span><strong>保留</strong></div>`;
   } catch (error) { toast(`设置读取失败：${error.message}`); }
 }
 
@@ -809,6 +839,7 @@ function bindEvents() {
   $("#header-upload").addEventListener("click", openUpload);
   $("#documents-upload").addEventListener("click", openUpload);
   $("#upload-form").addEventListener("submit", submitUpload);
+  $("#quality-mode").addEventListener("change", () => { if ($("#upload-dialog").open) { const offline = $("#quality-mode").value === "basic"; $("#upload-submit").disabled = !offline && !state.modelConfigured; $("#upload-message").textContent = offline ? "基础抽取在本机执行，不调用模型。" : state.modelConfigured ? "深度抽取将调用模型服务。" : "未配置模型密钥，请选择基础抽取。"; } });
   $("#upload-close").addEventListener("click", () => $("#upload-dialog").close());
   $("#upload-cancel").addEventListener("click", () => $("#upload-dialog").close());
   $("#detail-close").addEventListener("click", () => $("#document-dialog").close());
@@ -825,7 +856,8 @@ function bindEvents() {
     window.clearTimeout(documentSearchTimer);
     documentSearchTimer = window.setTimeout(loadWiki, 250);
   });
-  $("#wiki-type-filter").addEventListener("change", loadWiki);
+  $$(".wiki-type-tab").forEach((button) => button.addEventListener("click", () => setWikiType(button.dataset.wikiType)));
+  $("#wiki-type-filter").addEventListener("change", () => setWikiType($("#wiki-type-filter").value));
   $("#compile-build").addEventListener("click", buildKnowledge);
   $("#compilation-refresh").addEventListener("click", loadCompilation);
   $("#ask-form").addEventListener("submit", submitQuestion);

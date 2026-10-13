@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark" />
     <title>ResearchWiki · 可追溯研究知识库</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236ea8ff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='sans-serif' font-size='22' font-weight='700' fill='white'%3ERW%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/assets/styles.css?v=20261012-workbench-4" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261012-zh-first-2" />
   </head>
   <body>
     <div class="shell">
@@ -119,13 +119,20 @@
         <section class="view" id="view-wiki">
           <div class="split-layout">
             <article class="panel list-pane">
-              <div class="section-head"><div><p class="eyebrow">COMPILED WIKI</p><h3>主题页面</h3></div><span id="wiki-count" class="truth-label">—</span></div>
+              <div class="section-head"><div><p class="eyebrow">COMPILED WIKI</p><h3>知识页面</h3></div><span id="wiki-count" class="truth-label">—</span></div>
               <label class="search-field"><span>⌕</span><input id="wiki-search" type="search" placeholder="搜索 Wiki 标题" /></label>
-              <select id="wiki-type-filter" aria-label="Wiki 页面类型"><option value="">全部主题类型</option><option value="paper">论文</option><option value="method">方法</option><option value="dataset">数据集</option><option value="topic">主题</option></select>
+              <div class="wiki-type-tabs" role="group" aria-label="选择 Wiki 页面类型">
+                <button type="button" class="wiki-type-tab active" data-wiki-type="" aria-pressed="true">全部</button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="paper" aria-pressed="false">Paper<br><small>论文</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="topic" aria-pressed="false">Topic<br><small>主题</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="method" aria-pressed="false">Method<br><small>方法</small></button>
+                <button type="button" class="wiki-type-tab" data-wiki-type="dataset" aria-pressed="false">Dataset<br><small>数据集</small></button>
+              </div>
+              <select id="wiki-type-filter" class="hidden" aria-label="Wiki 页面类型"><option value="">全部</option><option value="paper">论文</option><option value="topic">主题</option><option value="method">方法</option><option value="dataset">数据集</option></select>
               <div id="wiki-list" class="wiki-list"></div>
             </article>
             <article class="panel detail-pane" id="wiki-detail">
-              <div class="empty-state"><strong>阅读主题，也读到它的依据</strong><p>选择页面查看跨来源知识、原文证据与相关主题。</p></div>
+              <div class="empty-state"><strong>选择页面类型，阅读可信知识</strong><p>可在 Paper、Topic、Method、Dataset 之间切换，查看专属内容与可追溯来源。</p></div>
             </article>
           </div>
         </section>
@@ -208,13 +215,14 @@
           <strong id="drop-label">拖入文件，或点击选择</strong>
           <span>PDF、Word、TXT 或 Markdown · 最大 50 MiB<br>文件先保存在本地，再进入知识抽取。</span>
         </label>
-        <div class="privacy-note">论文正文会发送至当前配置的 DeepSeek API。密钥只保存在服务端，不会下发到浏览器。</div>
+        <div class="privacy-note">基础模式只在本机解析论文；选择深度模式后，论文正文才发送至配置的模型服务。</div>
         <label class="mode-field">处理模式
           <select id="quality-mode" name="quality_mode">
-            <option value="standard">标准：一次结构化抽取</option>
-            <option value="high">高质量：先分析，再生成</option>
+            <option value="basic">基础抽取（离线，不调用模型）</option>
+            <option value="standard">深度抽取（调用一次模型）</option>
+            <option value="high">深度高质量（先分析、再抽取）</option>
           </select>
-          <small>高质量模式通常会多调用一次模型。</small>
+          <small>基础模式提取明确文本字段和已知数据集名称；深度模式补充方法、主题和实验分析。</small>
         </label>
         <div class="dialog-actions"><button class="secondary" id="upload-cancel" type="button">取消</button><button class="primary" id="upload-submit" type="submit">上传并处理</button></div>
         <p id="upload-message" class="form-message"></p>
@@ -229,6 +237,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/assets/app.js?v=20261012-workbench-4" defer></script>
+    <script src="/assets/app.js?v=20261012-two-tier-1" defer></script>
   </body>
 </html>

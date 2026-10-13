@@ -60,7 +60,9 @@ def test_compiler_combines_sources_replays_and_preserves_notes(tmp_path):
     assert first_run["raw_unchanged"] is True
     content = method.read_text()
     assert "[[Study Alpha]]" in content and "[[Study Beta]]" in content
-    assert "Accuracy is 70 percent." in content and "Accuracy is 85 percent." in content
+    summary_part = content.split("## 来源证据", 1)[0]
+    assert "Accuracy is 70 percent." not in summary_part and "Accuracy is 85 percent." not in summary_part
+    assert "## 方法定义" in content and "## 所属论文与应用场景" in content
     assert "我的待验证假设。" in content
     manifest_before = (config.wiki_root / "manifest.json").read_bytes()
     second_run = service.run()
@@ -98,7 +100,7 @@ def test_compiler_preserves_manual_collisions_and_blocks_raw_tampering(tmp_path)
     assert parse_frontmatter(generated.read_text())["generated_by"]
     assert any(d["code"] == "preserved_manual_page" for d in report["diagnostics"])
     # A manually edited managed fallback also must never be silently overwritten.
-    changed = generated.read_text().replace("## 稳定问题", "人工修订\n\n## 稳定问题")
+    changed = generated.read_text().replace("## 方法定义", "人工修订\n\n## 方法定义")
     generated.write_text(changed)
     failed = service.run()
     assert failed["status"] == "failed"

@@ -2,7 +2,27 @@
 
 ResearchWiki 是一个本地优先、可追溯的论文知识工作台。它接收 PDF、DOCX、Markdown 和纯文本资料，保存原文和结构化抽取，再编译成跨论文的 Paper、Method、Dataset、Topic 页面，供图谱、检索、问答和评估使用。
 
-当前默认使用 DeepSeek 做论文结构化抽取和基于证据的答案生成。原文、Wiki 和索引保存在本机；调用模型时，资料正文和检索到的 Wiki 片段会发送到当前配置的 DeepSeek API。
+当前默认使用本地规则抽取论文基础信息，**不需要配置 DeepSeek 密钥**。只有用户主动选择深度抽取、跨论文综合或基于模型的问答时，才向已配置的模型 API 发送相应论文内容或检索片段。原文、Wiki 和索引均保存在本机。
+
+## 双层抽取（基础离线 / 按需深度）
+
+上传资料时选择 **基础抽取（basic）**，只用本地文档解析和保守规则提取首页候选标题、明确标注的作者/关键词、年份、摘要、已知数据集的**提及**及文件来源，不调用大模型；未识别到的字段保留为空。纯扫描版 PDF 仍需先 OCR。数据集名称出现不代表用于实验，须复核。
+
+选择 **深度抽取（standard）** 或 **高质量深度抽取（high）**，会把论文文本（最多约 50,000 字符，长文保留首尾片段）发送到配置的模型。深度抽取补充方法定义及原理、研究主题、实验设置等；high 模式先分析再结构化抽取。深度分析是可选的，而且目前字段内容尚无逐条来源证据校验。
+
+已经使用 basic 建立索引的资料，可在「资料中心 → 详情」选择 **使用模型深度分析**，通过 `POST /api/documents/{id}/enrich?quality_mode=standard` 补充抽取。该操作需要模型密钥，失败时会尽量保留原有已索引内容。
+
+对于至少包含两篇深度抽取论文的 Topic，可以在 Wiki 主题页面主动点击 **用模型生成跨论文综合**，或使用 `rw synthesize "Topic 名称"`。结果保存在 `data/syntheses/`，仅在与现有论文抽取版本匹配时显示，明确标为待人工复核。普通 `rw compile` 不会调用模型。
+
+**注意**：现在上传完成时即使用统一知识编译器生成 Paper / Topic / Method / Dataset 专属模板，无需再额外执行 `rw compile` 才能看到新页面。`rw compile --dry-run` 仍可用于预览后续重建的变化。
+
+## 默认语言：中文优先，英文原文保留
+
+在 `config.yaml` 中将 `wiki.language` 保持为 `zh-CN`（项目默认值）。**深度抽取**生成的研究问题、方法解释、实验说明、数据集介绍、跨论文综合与证据问答默认使用简体中文；用户在问答时明确要求其他语言则遵从用户选择。英语论文标题、作者、原始摘要、作者关键词、方法和数据集的规范名称、缩写、DOI、页码定位及证据引文始终保持原文。
+
+深度抽取在独立的 `abstract_zh` 中保存中文摘要，并将原文摘要保存在 `abstract`；`name_zh` 和 `topic_labels_zh` 只是中文展示别名，不用于实体 ID、路径或关联匹配。Wiki 页面先展示中文摘要，再展示英文原文；Method/Topic/Dataset 在存在中文别名时显示「中文名称（Original Name）」。需要英文解释可把 `wiki.language` 设置成 `en`，原始数据同样保留。
+
+**基础离线抽取不会翻译**：只保存原文中的真实内容，未生成中文摘要会明确显示缺失，不以推测补足。旧版英文缓存不会因为执行 `rw compile` 而自动翻译；如需新增中文摘要和中文解释，请在「资料中心 → 详情」点击「重新生成中文解读」（或基础抽取资料的「使用模型深度分析」），系统会在确认后重新调用模型，保留原文和人工笔记。生成结果仍需对照英文原文核验。
 
 ## 直接运行网页版
 
@@ -23,7 +43,8 @@ cd /Users/w/Documents/ChatGPT/llmwiki
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-export DEEPSEEK_API_KEY='替换为你的-key'
+# 只有使用深度抽取 / 跨论文综合时才需要配置 DeepSeek Key：
+# export DEEPSEEK_API_KEY='替换为你的-key'
 rw init
 rw web --host 127.0.0.1 --port 8765
 ```
@@ -74,7 +95,7 @@ rw eval --compare        # 同一冻结语料/题库下对比两套策略
 ## 数据流
 
 ```text
-资料中心：SHA-256 原件 + 持久化任务 + 解析 + 模型抽取缓存
+资料中心：SHA-256 原件 + 持久化任务 + 本地基础抽取（默认）/ 可选模型深度抽取
     ↓
 知识编译：校验原件 / 聚合跨来源主题 / 预览差异 / 确定性提交
     ↓
@@ -101,9 +122,13 @@ Wiki 页面、引用、内链：Markdown + manifest.json + index.md + log.md
 
 ```text
 rw init                              创建 raw/wiki/schema/data/logs
-rw parse PAPER                       调用模型检查抽取，不写 Wiki
-rw ingest PAPER                      标准模式导入、抽取、编译 Wiki 并建立索引
-rw ingest PAPER --quality high       两阶段高质量导入
+rw parse PAPER                       离线基础抽取，不写 Wiki
+rw parse PAPER --deep                可选深度抽取，需要模型 Key
+rw ingest PAPER                      默认离线基础抽取并建立 Wiki 与索引
+rw ingest PAPER --quality standard   可选 DeepSeek 深度抽取
+rw ingest PAPER --quality high       高质量双调用深度分析
+rw ingest PAPER --quality standard --resume  对已导入论文追加深度抽取
+rw synthesize "Topic 名称"             按需生成跨论文比较并标为待复核
 rw ingest PAPER --resume             重新处理已有或失败资料
 rw search QUERY --top-k N            搜索本地 Wiki
 rw ask QUESTION --top-k N            基于检索证据回答
@@ -183,8 +208,10 @@ retrieval:
 
 - `raw/papers/`：按内容哈希保存的原始资料副本。
 - `data/inbox/`：Web 上传暂存区；当前不会自动清理。
-- `data/extractions/`：模型返回并通过校验的结构化 JSON。
+- `data/extractions/`：本地基础抽取或可选模型深度抽取的结构化 JSON。
 - `data/analyses/`：高质量模式第一阶段的最终分析说明。
+- `data/syntheses/`：用户主动生成的跨论文比较缓存（含来源哈希与审核状态）。
+- `data/dataset_catalog.json`（可选）：自定义已知数据集名称列表，例如 `["LeCaRD", "ELAM"]`。
 - `data/trash/`：删除操作产生的可恢复文件。
 - `wiki/`：由原始资料派生的 Markdown 知识层；原始资料仍是复核依据。
 - `wiki/manifest.json`：来源哈希、稳定页面 ID、内容摘要、引用、内链和精确证据定位。
@@ -202,7 +229,8 @@ retrieval:
 ## 当前边界
 
 - PDF 依赖文本层，没有 OCR；纯扫描版和未解锁的加密 PDF 会提示先预处理。DOCX 提取正文段落，使用逻辑文本流和字符区间；其 `page=1` 不代表 Word 渲染后的物理第一页。
-- 抽取提示最多使用约 50,000 个字符，不是逐页全文证据抽取。
+- 基础抽取采用保守规则与可选本地 PDF 元数据，复杂排版、多栏正文、未明确标注的作者/关键词可能遗漏；需要人工复核。
+- 深度抽取提示最多使用约 50,000 个字符，不是逐页全文证据抽取。
 - 向量检索默认关闭，需要在 `config.yaml` 中启用并配置支持 `/embeddings` 的服务；DeepSeek 聊天模型本身不等同于嵌入模型。
 - 引用记录原始资料哈希、页码或段落、字符区间和原文摘录；尚未实现 PDF 坐标框高亮或每条论断的独立证据核验。未命中主题原词的来源摘录会明确标记为 fallback。
 - 队列状态持久化在 SQLite，但执行器仍是单机单工作线程，不是多节点任务系统。

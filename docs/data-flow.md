@@ -10,19 +10,24 @@
 | 排队 | source id、处理模式 | SQLite `ingest_jobs` | `PENDING/RUNNING` | 阶段、次数、错误 |
 | 固化原文 | 文件字节 | `raw/papers/<sha256>.<ext>` | `UPLOADED` | 原文副本与哈希 |
 | 解析 | PDF / DOCX / MD / TXT | 内存中的 `ParsedDocument` | `EXTRACTING` | 原文、错误信息 |
-| 结构化抽取 | 正文文本 | `data/extractions/<sha256>.json`；高质量模式另有 `data/analyses/` | `EXTRACTED` | 原文、分析、数据库记录 |
-| 导入时写 Wiki | 单篇结构化论文对象 | staging 后整批提交论文页和共享实体页 | `WIKI_CREATED` | 写入失败时回滚已替换页面 |
+| 基础抽取（默认） | 文本层、PDF 元数据及已知数据集词典 | `data/extractions/<sha256>.json`，含 `extraction_mode=basic` | `EXTRACTED` | 原文、结构化字段、缺失信息 |
+| 可选深度抽取 | 用户明确选择深度模式；论文正文 | 缓存增加方法原理、主题、实验信息；`high` 另存 `data/analyses/` | `EXTRACTED` | 深度请求失败时保留已有基础 Wiki 与缓存 |
+| 统一 Wiki 编译 | 全部有效的结构化缓存 | 编译四类页面及来源、引用、清单和日志 | `WIKI_CREATED` | 编译失败时保留人工笔记与旧 Wiki |
 | 独立知识编译 | 全部活动资料的原件与抽取缓存 | 跨来源页面、`manifest.json`、`index.md`、追加 `log.md`、运行报告 | `ready/blocked → succeeded/failed` | 原件、个人笔记、未知人工页；提交失败时回滚 |
 | 建立索引 | 全部 Wiki Markdown 与解析页 | pages、chunks、FTS5、带页码/字符区间/摘录的 `page_sources`、links、可选 embeddings | `INDEXED` | 全部产物 |
 | 图谱投影 | Wiki 页面、来源证据、页面类型、互链 | `graph_nodes`、`graph_edges`、`graph_runs` | `INDEXED` | 确定性 digest 与最近运行 |
 
-文档 ID 是原始文件的完整 SHA-256。文件名、论文标题或模型输出发生变化时，内容身份仍保持稳定。
+文档 ID 是原始文件的完整 SHA-256。文件名、论文标题或模型输出发生变化时，内容身份仍保持稳定。基础处理不调用任何模型，深度处理只在上传选择或再次触发时调用。
 
 Web 接口校验后先持久化 job 再返回 `202`，单工作线程领取任务。前端轮询状态；同一 hash 同时最多有一个活动任务。服务重启后仍为 `PENDING` 的任务会继续执行，运行中断的任务会标为可重试 `FAILED`。
 
-独立编译由 `rw compile` 或 `POST /api/compilation/build` 触发；`rw compile --dry-run`、`GET /api/compilation` 预览输入、拟更新页面、保留页面和诊断，`GET /api/compilation/history` 读取历史报告。编译只用 `data/extractions/<hash>.json`，不调用模型。API 将编译与导入串行化，成功后重建索引及图谱；`rw build` 仅重建现有 Wiki 的索引，不会从抽取缓存重新生成正文。
+导入成功时已经走同一编译器。独立编译由 `rw compile` 或 `POST /api/compilation/build` 触发；`rw compile --dry-run`、`GET /api/compilation` 预览输入、拟更新页面、保留页面和诊断，`GET /api/compilation/history` 读取历史报告。编译只用 `data/extractions/<hash>.json`，不调用模型。API 将编译与导入串行化，成功后重建索引及图谱；`rw build` 仅重建现有 Wiki 的索引，不会从抽取缓存重新生成正文。
 
 编译器校验原件 SHA-256 与抽取缓存的 `source_hash`，以来源哈希识别论文，以规范化名称识别方法、数据集和主题。清单包含来源版本、页面 ID、路径、来源、内链、证据和内容摘要。运行时间只进入日志与运行报告，不进入生成内容摘要；同样输入产生同样生成内容，个人笔记不影响 `content_digest`。旧版生成文件仅在可重现其生成区时接管；人工内容冲突阻止覆盖，失去当前来源的旧页保留并标记待复核。
+
+### 按需跨论文深度综合
+
+Topic 页面可通过 `POST /api/wiki/topics/{page_id}/synthesize` 或 `rw synthesize "主题名"` 显式请求模型。该操作需要至少两篇同主题的深度抽取论文，模型基于结构化缓存生成带有源文档 ID 的比较声明。结果缓存在 `data/syntheses/<topic-id>.json`，普通 `rw compile` 不触发模型；如果底层论文缓存发生变化，旧综合不会继续显示。此类输出仅进行了来源编号约束，仍须人工逐条回原始 PDF 核验。
 
 ## 2. 读取主链
 

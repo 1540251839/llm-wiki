@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .config import Config
+from .extraction.synthesis import load_topic_synthesis
 from .index.database import Database
 from .models import ParsedDocument, StructuredPaper
 from .parsing.pdf import parse_file
@@ -270,6 +271,35 @@ class CompilationService:
             spec["path"] = path
             reserved.add(path)
 
+    def _display_title(self, spec: Dict[str, Any]) -> str:
+        """Chinese display alias, original stable entity name remains unchanged."""
+        name = spec["title"]
+        if self.config.wiki_language != "zh-CN" or spec["type"] == "paper":
+            return name
+        aliases: List[str] = []
+        for source, _description, _role in spec["contributors"]:
+            paper = source.paper
+            if spec["type"] == "topic":
+                aliases.extend(
+                    str(alias).strip() for original, alias in paper.topic_labels_zh.items()
+                    if normalize_name(original) == normalize_name(name) and str(alias).strip()
+                )
+            elif spec["type"] in {"method", "dataset"}:
+                entities = paper.methods if spec["type"] == "method" else paper.datasets
+                aliases.extend(
+                    item.name_zh.strip() for item in entities
+                    if normalize_name(item.name) == normalize_name(name) and item.name_zh.strip()
+                )
+        # A translated label is for reading only; it must never alter IDs or links.
+        aliases = [alias for alias in aliases if re.search(r"[\u3400-\u9fff]", alias)]
+        if not aliases:
+            return name
+        counts = Counter(aliases)
+        preferred = sorted(counts, key=lambda item: (-counts[item], item))[0]
+        if normalize_name(preferred) == normalize_name(name):
+            return name
+        return f"{preferred}（{name}）"
+
     def _render(self, spec: Dict[str, Any], title_by_id: Dict[str, str]) -> Tuple[str, List[Dict[str, Any]]]:
         contributors = spec["contributors"]
         evidence = []
@@ -277,38 +307,72 @@ class CompilationService:
             terms = [spec["title"], description]
             evidence.append(self._evidence(source, terms))
         source_ids = [source.source_id for source, _, _ in contributors]
-        front = {"id": spec["id"], "type": spec["type"], "title": spec["title"], "sources": source_ids,
-                 "generated_by": COMPILER, "schema_version": SCHEMA_VERSION}
+        display_title = self._display_title(spec)
+        front = {"id": spec["id"], "type": spec["type"], "title": spec["title"], "display_title": display_title,
+                 "sources": source_ids, "generated_by": COMPILER, "schema_version": SCHEMA_VERSION}
         if spec["type"] == "paper":
             source = contributors[0][0]
             paper = source.paper
             front.update(source=source.raw_path, source_hash=source.source_id, authors=paper.authors, year=paper.year)
-            lines = [f"# {paper.title}", "", "## 基本信息", "", f"作者：{', '.join(paper.authors) or '未提供'}", f"年份：{paper.year or '未提供'}", ""]
-            for heading, text in (("摘要", paper.abstract), ("研究问题", paper.research_problem), ("核心方法", paper.methodology)):
-                lines.extend(["## " + heading, "", (str(text).strip() + " [1]") if text else "来源抽取未提供；不能据此推断结论。", ""])
-            for heading, values in (("主要贡献", paper.contributions), ("评价指标", paper.metrics), ("主要实验结论", paper.findings), ("局限性", paper.limitations)):
-                lines.extend(["## " + heading, "", *(["- " + value + " [1]" for value in values] or ["- 未抽取到明确证据。"]), ""])
-            for heading, kind, values in (("方法", "method", paper.methods), ("数据集", "dataset", paper.datasets), ("相关研究主题", "topic", paper.topics)):
+            lines = [
+                f"# {paper.title}", "", "## 基本信息", "",
+                f"作者：{', '.join(paper.authors) or '未提供'}",
+                f"年份：{paper.year or '未提供'}", "",
+            ]
+            if self.config.wiki_language == "zh-CN":
+                lines.extend(["## 中文摘要", "",
+                    (paper.abstract_zh.strip() + " [1]\n\n*中文内容由模型生成，需对照原文核实。*")
+                    if paper.abstract_zh.strip()
+                    else "暂无中文摘要。基础模式不调用翻译模型；保留以下原文摘要。", ""])
+            lines.extend([
+                "## 原文摘要（Abstract）", "",
+                (paper.abstract.strip() + " [1]") if paper.abstract else "原文未提取到摘要。",
+                "", "## 关键词（原文）", "",
+            ])
+            lines.extend(["- " + keyword for keyword in paper.keywords] or ["- 原文未提取到作者关键词。"])
+            for heading, kind, values in (("数据集", "dataset", paper.datasets), ("相关方法", "method", paper.methods), ("相关研究主题", "topic", paper.topics)):
                 names = [value if isinstance(value, str) else value.name for value in values]
                 names = [title_by_id.get(kind + ":" + hashlib.sha256(normalize_name(name).encode("utf-8")).hexdigest()[:16], name) for name in names if name.strip()]
-                lines.extend(["## " + heading, "", *(["- [[" + name + "]]" for name in dict.fromkeys(names)] or ["- 未识别。"]), ""])
+                lines.extend(["", "## " + heading, "", *(["- [[" + name + "]]" for name in dict.fromkeys(names)] or ["- 未识别。"])])
+            lines.extend(["", "## 实验信息", "", paper.experiment_info.strip() + " [1]" if paper.experiment_info.strip() else "原文未提取到明确实验设置。"])
+            if paper.metrics:
+                lines.extend(["", "### 评价指标", "", *["- " + x + " [1]" for x in paper.metrics]])
+            lines.extend(["", "## 原文来源", "", "原始文件：`" + source.raw_path + "`", "SHA-256：`" + source.source_id + "`", ""])
         else:
-            heading = {"method": "方法在不同研究中的用途", "dataset": "数据集在不同研究中的用途", "topic": "研究问题与跨来源比较"}[spec["type"]]
-            lines = ["# " + spec["title"], "", "## 稳定问题", "", f"{spec['title']} 在这些论文中如何定义、使用，其证据和适用边界是什么？", "", "## " + heading, ""]
+            kind = spec["type"]
+            lines = ["# " + display_title, ""]
+            if kind == "topic":
+                lines.extend(["## 概念简介", "", "由相关论文汇集的研究主题；尚未核实独立定义。", "", "## 研究方向分类", "", "尚未形成有证据支持的子方向分类。", "", "## 相关论文", ""])
+            elif kind == "method":
+                definitions = [(i, d) for i, (_, d, _) in enumerate(contributors, 1) if d.strip()]
+                principles = [(i, p) for i, (source, _, _) in enumerate(contributors, 1) for method in source.paper.methods if normalize_name(method.name) == normalize_name(spec["title"]) for p in [method.principle] if p.strip()]
+                lines.extend(["## 方法定义", "", *([f"- {d} [{i}]" for i,d in definitions] or ["来源未提供明确的方法定义。"]), "", "## 基本原理", "", *([f"- {p} [{i}]" for i,p in principles] or ["来源未提供可核验的原理说明。"]), "", "## 所属论文与应用场景", ""])
+            else:
+                descriptions = [(i, d) for i, (_, d, _) in enumerate(contributors, 1) if d.strip()]
+                statistics = [(i, p) for i, (source, _, _) in enumerate(contributors, 1) for dataset in source.paper.datasets if normalize_name(dataset.name) == normalize_name(spec["title"]) for p in [dataset.statistics] if p.strip()]
+                lines.extend(["## 数据集简介", "", *([f"- {d} [{i}]" for i,d in descriptions] or ["来源未提供数据集简介。"]), "", "## 任务", "", *([f"- {role} [{i}]" for i,(_, _, role) in enumerate(contributors, 1) if role.strip()] or ["来源未提供明确的任务说明。"]), "", "## 统计信息", "", *([f"- {p} [{i}]" for i,p in statistics] or ["来源未提供可核验的统计信息。"]), "", "## 使用该数据集的论文", ""])
             for index, (source, description, role) in enumerate(contributors, 1):
-                paper = source.paper
-                lines.extend(["### [[" + paper.title + "]]", ""])
-                if description:
-                    lines.extend([description + f" [{index}]", ""])
-                if role:
-                    lines.extend(["用途：" + role + f" [{index}]", ""])
-                if not description and not role:
-                    lines.extend([(paper.research_problem or paper.abstract or "来源将该主题列为研究主题；未提供进一步定义。") + f" [{index}]", ""])
-                if paper.findings:
-                    lines.extend(["该论文的相关结论（需结合原文适用条件）：", "", *["- " + item + f" [{index}]" for item in paper.findings[:4]], ""])
-                if paper.limitations:
-                    lines.extend(["该来源的边界：", "", *["- " + item + f" [{index}]" for item in paper.limitations[:3]], ""])
-            lines.extend(["## 证据边界", "", "各来源的观点分别保留；共享术语不代表实验条件或结论一致。编号指向来源片段，抽取结果仍需对照原文复核。", ""])
+                lines.append("- [[" + source.paper.title + "]]")
+                if kind != "topic" and role.strip():
+                    lines.append("  - 用途：" + role + f" [{index}]")
+            lines.extend(["", "## 证据说明", "", "此页仅汇总各来源中相关的知识与出处，不重复整篇论文摘要或完整实验结论。来源摘录不等于对每条论断独立核验。", ""])
+        if spec["type"] == "topic":
+            summary = load_topic_synthesis(
+                self.config.root, spec["title"],
+                [(source.source_id, source.paper) for source, _, _ in contributors],
+            )
+            if summary is not None:
+                references = {source.source_id: i for i, (source, _, _) in enumerate(contributors, 1)}
+                lines.extend(["## 深度跨论文综合（待人工复核）", "",
+                              "以下结论由模型根据结构化抽取记录生成，并非已核实的原文级事实。", ""])
+                for heading, key in (("研究发现与比较", "claims"), ("开放问题", "open_questions")):
+                    lines.extend(["### " + heading, ""])
+                    for item in summary.get(key, []):
+                        nums = [references.get(source_id) for source_id in item.get("source_ids", [])]
+                        if all(nums) and nums:
+                            citations = " ".join(f"[{num}]" for num in nums)
+                            lines.append("- " + str(item["text"]) + " " + citations)
+                    lines.append("")
         lines.extend(["## 来源证据", ""])
         for index, ((source, _, _), span) in enumerate(zip(contributors, evidence), 1):
             label = "原文命中" if span["confidence"] == "exact_text" else "来源摘录（未定位到主题原词，不代表逐条论断已核验）"
@@ -340,7 +404,8 @@ class CompilationService:
             old = path.read_text(encoding="utf-8") if path.exists() else None
             changes["created" if old is None else "unchanged" if old == content else "updated"].append(relative)
             planned[path] = content
-            pages.append({"id": spec["id"], "title": spec["title"], "type": spec["type"], "path": relative,
+            pages.append({"id": spec["id"], "title": spec["title"], "display_title": self._display_title(spec),
+                          "type": spec["type"], "path": relative,
                           "sources": [item[0].source_id for item in spec["contributors"]], "links": wiki_links(generated),
                           "generated_sha256": _digest(self.wiki._generated_part(content)), "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(), "evidence": evidence})
             descriptions = {description.strip() for _, description, _ in spec["contributors"] if description.strip()}
@@ -390,7 +455,7 @@ class CompilationService:
             for page in manifest["pages"]:
                 if page["type"] == kind:
                     relative = (self.config.root / page["path"]).relative_to(self.config.wiki_root).as_posix()
-                    lines.append(f"- [{page['title']}]({relative}) · {len(page['sources'])} 个来源")
+                    lines.append(f"- [{page.get('display_title') or page['title']}]({relative}) · {len(page['sources'])} 个来源")
             lines.append("")
         return "\n".join(lines)
 

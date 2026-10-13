@@ -22,16 +22,19 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("init", help="create the local workspace")
     parse_cmd = sub.add_parser("parse", help="extract structured paper JSON without writing Wiki pages")
     parse_cmd.add_argument("paper")
+    parse_cmd.add_argument("--deep", action="store_true", help="use LLM instead of the default offline metadata extractor")
     ingest_cmd = sub.add_parser("ingest", help="import a paper and update the Wiki")
     ingest_cmd.add_argument("paper")
     ingest_cmd.add_argument("--resume", action="store_true", help="re-run an existing/failed import")
-    ingest_cmd.add_argument("--quality", choices=("standard", "high"), default=None, help="use one-call or two-stage extraction")
+    ingest_cmd.add_argument("--quality", choices=("basic", "standard", "high"), default=None, help="basic=offline (default), standard=deep, high=two-pass deep")
     search_cmd = sub.add_parser("search", help="search indexed Wiki pages")
     search_cmd.add_argument("query")
     search_cmd.add_argument("--top-k", type=int, default=None)
     ask_cmd = sub.add_parser("ask", help="answer a question from retrieved Wiki pages")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--top-k", type=int, default=None)
+    synth_cmd = sub.add_parser("synthesize", help="optional LLM synthesis of at least two deep-extracted papers on a topic")
+    synth_cmd.add_argument("topic", help="exact research topic page title")
     sub.add_parser("build", help="rebuild the Wiki index and page links")
     compile_cmd = sub.add_parser("compile", help="compile cached paper extractions into traceable Wiki pages")
     compile_cmd.add_argument("--dry-run", action="store_true", help="inspect inputs and planned changes without writing")
@@ -64,7 +67,7 @@ def main(argv: Any = None) -> None:
             for key, value in paths.items():
                 print(f"  {key}: {value}")
         elif args.command == "parse":
-            print(json.dumps(parse_only(config, args.paper).to_dict(), ensure_ascii=False, indent=2))
+            print(json.dumps(parse_only(config, args.paper, mode="standard" if args.deep else "basic").to_dict(), ensure_ascii=False, indent=2))
         elif args.command == "ingest":
             result = ingest(config, args.paper, resume=args.resume, quality_mode=args.quality)
             if result["status"] == "already_exists":
@@ -82,6 +85,15 @@ def main(argv: Any = None) -> None:
                 print(f"{index}. [{result['type']}] {result['title']} — {result['path']}")
         elif args.command == "ask":
             print(do_ask(config, args.question, args.top_k))
+        elif args.command == "synthesize":
+            from .extraction.synthesis import synthesize_topic
+            from .compilation import CompilationService
+            value = synthesize_topic(config, args.topic)
+            report = CompilationService(config).run()
+            if report["status"] != "succeeded":
+                raise RuntimeError("Topic synthesis was cached but compilation failed: " + str(report.get("diagnostics")))
+            rebuild(config)
+            print(json.dumps({"topic": args.topic, "summary": value}, ensure_ascii=False, indent=2))
         elif args.command == "build":
             stats = rebuild(config)
             print(f"Built index: {stats['pages']} pages, {stats['links']} links, {stats['stale']} stale pages removed")

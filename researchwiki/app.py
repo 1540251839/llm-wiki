@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union, Optional
 
 from .config import Config
-from .extraction.paper import analyze_paper, extract_paper
+from .extraction.paper import analyze_paper, extract_paper, enrich_paper
+from .extraction.basic import extract_basic
 from .graph import extract_graph
 from .index.database import Database
 from .llm.client import LLMClient
@@ -135,7 +136,7 @@ def _create_quality_reviews(db: Database, source_id: str, paper: StructuredPaper
             source_id=source_id,
             details={"title": paper.title},
         )
-    if not paper.limitations:
+    if paper.extraction_mode != "basic" and not paper.limitations:
         db.add_review(
             "missing_limitations",
             "未抽取到局限性；这可能是论文未明确说明，也可能需要人工复核。",
@@ -259,10 +260,14 @@ def ingest(
     file_hash = _hash_file(source_path)
     db = Database(config.db_path)
     try:
-        mode = (quality_mode or config.quality_mode).strip().lower()
-        if mode not in {"standard", "high"}:
-            raise ValueError("quality_mode must be 'standard' or 'high'")
+        mode = (quality_mode or ("standard" if llm_client is not None else config.quality_mode)).strip().lower()
+        if mode not in {"basic", "standard", "high"}:
+            raise ValueError("quality_mode must be basic, standard or high")
         duplicate = db.find_by_hash(file_hash)
+        previous_indexed = bool(duplicate and duplicate["status"] == "INDEXED")
+        extraction_path = config.root / "data" / "extractions" / (file_hash + ".json")
+        previous_extraction = extraction_path.read_bytes() if previous_indexed and extraction_path.exists() else None
+        previous_record = db.get_paper(file_hash) if previous_indexed else None
         if duplicate and duplicate["status"] == "INDEXED" and not resume:
             return {"status": "already_exists", "title": duplicate["title"], "paper_path": None, "entity_paths": []}
         _job_stage(db, job_id, "COPY_SOURCE")
@@ -286,15 +291,34 @@ def ingest(
         _job_stage(db, job_id, "PARSE")
         document = parse_file(source_path)
         db.update_paper_status(file_hash, "EXTRACTING")
-        llm = llm_client or LLMClient(config.llm)
-        analysis = ""
-        if mode == "high":
-            _job_stage(db, job_id, "ANALYZE")
-            analysis = analyze_paper(document, llm=llm, purpose=_purpose(config))
-            analysis_path = config.root / "data" / "analyses" / (file_hash + ".md")
-            _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
         _job_stage(db, job_id, "EXTRACT")
-        paper = extract_paper(document, llm=llm, analysis=analysis, purpose=_purpose(config))
+        base = extract_basic(document, source_path=source_path, workspace_root=config.root)
+        if previous_extraction is not None and mode != "basic":
+            previous = StructuredPaper.from_dict(json.loads(previous_extraction.decode("utf-8")))
+            if previous.source_hash == file_hash:
+                if base.title == "Untitled Paper":
+                    base.title = previous.title
+                base.authors = base.authors or previous.authors
+                base.year = base.year or previous.year
+                base.abstract = base.abstract or previous.abstract
+                base.abstract_zh = previous.abstract_zh
+                base.topic_labels_zh = dict(previous.topic_labels_zh)
+                base.keywords = base.keywords or previous.keywords
+        if mode == "basic":
+            paper = base
+        else:
+            llm = llm_client or LLMClient(config.llm)
+            analysis = ""
+            if mode == "high":
+                _job_stage(db, job_id, "ANALYZE")
+                analysis = analyze_paper(document, llm=llm, purpose=_purpose(config), language=config.wiki_language)
+                analysis_path = config.root / "data" / "analyses" / (file_hash + ".md")
+                _atomic_write_text(analysis_path, analysis.rstrip() + "\n")
+            paper = enrich_paper(
+                document, baseline=base, llm=llm, analysis=analysis,
+                purpose=_purpose(config), quality_mode=mode, source_path=source_path,
+                language=config.wiki_language,
+            )
         title_duplicate = db.find_indexed_title_duplicate(paper.title, file_hash)
         if title_duplicate:
             raise RuntimeError(
@@ -309,8 +333,21 @@ def ingest(
         _atomic_write_text(structured_path, json.dumps(paper.to_dict(), ensure_ascii=False, indent=2) + "\n")
         _create_quality_reviews(db, file_hash, paper)
         _job_stage(db, job_id, "COMMIT_WIKI")
+        # All ingest modes use the same compiler as "rw compile", eliminating
+        # old/new Wiki template divergence and preserving protected user notes.
+        from .compilation import CompilationService
+        report = CompilationService(config, database=db).run()
+        if report.get("status") != "succeeded":
+            raise RuntimeError("Wiki compilation failed: " + str(report.get("error") or report.get("diagnostics")))
+        manifest_pages = CompilationService(config, database=db).manifest().get("pages", [])
+        my_pages = [item for item in manifest_pages if file_hash in item.get("sources", [])]
+        paper_item = next((item for item in my_pages if item["type"] == "paper"
+                           and item["id"] == "paper:" + file_hash), None)
+        if not paper_item:
+            raise RuntimeError("Wiki compiler did not emit a paper page")
+        paper_path = config.root / paper_item["path"]
+        entity_paths = [config.root / item["path"] for item in my_pages if item["type"] != "paper"]
         wiki = WikiManager(config.wiki_root)
-        paper_path, entity_paths = wiki.ingest(paper, str(raw_path.relative_to(config.root)))
         db.upsert_paper(file_hash, paper.title, paper.authors, paper.year, str(source_path), str(raw_path), "WIKI_CREATED")
         _job_stage(db, job_id, "REBUILD_INDEX")
         stats = db.rebuild(wiki)
@@ -327,7 +364,20 @@ def ingest(
         _log(config, {"event": "ingest", "title": paper.title, "source": str(source_path), "paper": str(paper_path), "entities": [str(p) for p in entity_paths], "quality_mode": mode, "index": stats, "vectors": vector_stats})
         return {"status": "indexed", "title": paper.title, "paper_path": str(paper_path), "entity_paths": [str(p) for p in entity_paths], "quality_mode": mode, "index": stats, "vectors": vector_stats}
     except Exception as exc:
-        if "file_hash" in locals():
+        # Deep enrichment must not destroy a previously indexed basic record
+        # if the optional model, compiler or index fails.
+        if "previous_indexed" in locals() and previous_indexed and previous_record:
+            try:
+                if previous_extraction is not None:
+                    _atomic_write_text(extraction_path, previous_extraction.decode("utf-8"))
+                db.upsert_paper(
+                    file_hash, previous_record["title"], previous_record.get("authors") or [],
+                    previous_record.get("year"), previous_record.get("source_path") or "",
+                    previous_record.get("raw_path") or "", "INDEXED",
+                )
+            except Exception:
+                pass
+        if "file_hash" in locals() and not ("previous_indexed" in locals() and previous_indexed):
             try:
                 failed_title = paper.title if "paper" in locals() else source_path.stem
                 failed_authors = paper.authors if "paper" in locals() else []
@@ -481,23 +531,40 @@ def do_search(config: Config, query: str, top_k: Optional[int] = None) -> List[D
 
 def do_ask(config: Config, question: str, top_k: Optional[int] = None) -> str:
     results = do_search(config, question, top_k=top_k)
-    return answer(question, results, LLMClient(config.llm), context_config=config.retrieval)
+    return answer(question, results, LLMClient(config.llm), context_config={**config.retrieval, "wiki_language": config.wiki_language})
 
 
 def do_ask_with_metadata(config: Config, question: str, top_k: Optional[int] = None) -> Dict[str, Any]:
     results = do_search(config, question, top_k=top_k)
-    return answer_with_metadata(question, results, LLMClient(config.llm), context_config=config.retrieval)
+    return answer_with_metadata(question, results, LLMClient(config.llm), context_config={**config.retrieval, "wiki_language": config.wiki_language})
 
 
 def do_answer_events(config: Config, question: str, top_k: Optional[int] = None):
     results = do_search(config, question, top_k=top_k)
     yield from answer_events(question, results, LLMClient(config.llm),
-                             context_config={**config.retrieval, "top_k": top_k or config.top_k})
+                             context_config={**config.retrieval, "top_k": top_k or config.top_k, "wiki_language": config.wiki_language})
 
 
-def parse_only(config: Config, source: Union[str, Path], llm_client: Optional[LLMClient] = None) -> StructuredPaper:
-    document = parse_file(Path(source).expanduser())
-    return extract_paper(document, llm_client or LLMClient(config.llm))
+def parse_only(
+    config: Config,
+    source: Union[str, Path],
+    llm_client: Optional[LLMClient] = None,
+    mode: str = "basic",
+) -> StructuredPaper:
+    path = Path(source).expanduser().resolve()
+    document = parse_file(path)
+    base = extract_basic(document, source_path=path, workspace_root=config.root)
+    if mode == "basic":
+        return base
+    if mode not in {"standard", "high"}:
+        raise ValueError("mode must be basic, standard or high")
+    client = llm_client or LLMClient(config.llm)
+    analysis = analyze_paper(document, client, purpose=_purpose(config), language=config.wiki_language) if mode == "high" else ""
+    return enrich_paper(
+        document, base, client, analysis=analysis,
+        purpose=_purpose(config), quality_mode=mode, source_path=path,
+        language=config.wiki_language,
+    )
 
 
 def _log(config: Config, data: Dict[str, Any]) -> None:

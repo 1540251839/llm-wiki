@@ -146,7 +146,7 @@ def _drain_ingest_queue(root: Path) -> None:
                     config,
                     source,
                     resume=True,
-                    quality_mode=str(job.get("quality_mode") or "standard"),
+                    quality_mode=str(job.get("quality_mode") or "basic"),
                     job_id=int(job["id"]),
                 )
             except Exception as exc:  # ingest persists FAILED before returning here
@@ -333,11 +333,11 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     @app.post("/api/documents", status_code=202)
     async def upload_document(
         file: UploadFile = File(...),
-        quality_mode: str = Form(default="standard"),
+        quality_mode: str = Form(default="basic"),
     ) -> Dict[str, Any]:
         quality_mode = quality_mode.strip().lower()
-        if quality_mode not in {"standard", "high"}:
-            raise HTTPException(status_code=400, detail="quality_mode must be standard or high")
+        if quality_mode not in {"basic", "standard", "high"}:
+            raise HTTPException(status_code=400, detail="quality_mode must be basic, standard or high")
         filename = _safe_upload_name(file.filename or "document")
         suffix = Path(filename).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
@@ -419,8 +419,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 raise HTTPException(status_code=409, detail="The source file is missing; upload it again")
             previous_job = db.latest_ingest_job(paper_id)
             requested_mode = quality_mode.strip().lower() or str((previous_job or {}).get("quality_mode") or config.quality_mode)
-            if requested_mode not in {"standard", "high"}:
-                raise HTTPException(status_code=400, detail="quality_mode must be standard or high")
+            if requested_mode not in {"basic", "standard", "high"}:
+                raise HTTPException(status_code=400, detail="quality_mode must be basic, standard or high")
             db.update_paper_status(paper_id, "UPLOADED")
             job = db.retry_ingest_job(int(previous_job["id"]), requested_mode) if previous_job else None
             if job is None:
@@ -435,6 +435,30 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             db.close()
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"document": _document(config, updated or paper, job=job), "job": job, "deduplicated": False, "action": "queued"}
+
+    @app.post("/api/documents/{paper_id}/enrich", status_code=202)
+    def enrich_document(
+        paper_id: str,
+        quality_mode: str = Query(default="standard", pattern="^(standard|high)$"),
+    ) -> Dict[str, Any]:
+        """Explicitly reprocess an existing document with optional LLM analysis."""
+        if not LLMClient(config.llm).enabled:
+            raise HTTPException(status_code=409, detail="Deep extraction requires a configured model API key")
+        with _UPLOAD_LOCK:
+            db = Database(config.db_path)
+            try:
+                paper = db.get_paper(paper_id)
+                if not paper or str(paper.get("status")) != "INDEXED":
+                    raise HTTPException(status_code=409, detail="Only indexed documents can be enriched")
+                candidates = [Path(v) for v in (str(paper.get("raw_path") or ""), str(paper.get("source_path") or "")) if v]
+                source = next((p for p in candidates if p.is_file()), None)
+                if source is None:
+                    raise HTTPException(status_code=409, detail="Original source file is missing")
+                job = db.enqueue_ingest_job(paper_id, str(source), quality_mode, config.max_ingest_attempts)
+            finally:
+                db.close()
+        app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
+        return {"action": "queued", "job": job, "source_id": paper_id}
 
     @app.delete("/api/documents/{paper_id}")
     def remove_document(
@@ -573,22 +597,72 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         finally:
             _INGEST_LOCK.release()
 
+    @app.post("/api/wiki/topics/{page_id}/synthesize")
+    def synthesize_wiki_topic(page_id: int) -> Dict[str, Any]:
+        """Optional LLM-only synthesis; never runs during the normal compiler."""
+        from ..extraction.synthesis import synthesize_topic
+        if not LLMClient(config.llm).enabled:
+            raise HTTPException(status_code=409, detail="跨论文深度汇总需要配置模型 API Key")
+        if not _INGEST_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="已有资料导入或知识编译任务正在运行")
+        try:
+            db = Database(config.db_path)
+            try:
+                page = db.get_wiki_page(page_id)
+            finally:
+                db.close()
+            if not page or page.get("type") != "topic":
+                raise HTTPException(status_code=404, detail="未找到研究主题 Wiki 页面")
+            try:
+                summary = synthesize_topic(config, str(page["title"]))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            report = CompilationService(config).run()
+            if report["status"] != "succeeded":
+                raise HTTPException(status_code=409, detail="汇总已缓存，但 Wiki 编译失败，请检查编译诊断")
+            rebuild(config)
+            return {"ok": True, "topic": page["title"],
+                    "claim_count": len(summary["claims"]),
+                    "question_count": len(summary["open_questions"]),
+                    "review_status": summary["review_status"]}
+        finally:
+            _INGEST_LOCK.release()
+
     @app.get("/api/wiki/pages")
     def list_wiki_pages(
         q: str = Query(default="", max_length=200),
         type: str = Query(default="", max_length=32),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> Dict[str, Any]:
+        # Stable page identity remains its original name; Chinese aliases are display-only.
+        manifest = CompilationService(config).manifest()
+        labels = {
+            str(item.get("path") or ""): str(item.get("display_title") or item.get("title") or "")
+            for item in manifest.get("pages", [])
+            if isinstance(item, dict)
+        }
+        def localized(page: Dict[str, Any]) -> Dict[str, Any]:
+            relative = _relative_name(config.root, str(page.get("path") or ""))
+            return {**page, "path": relative,
+                    "display_title": labels.get(relative) or str(page.get("title") or "")}
+
         db = Database(config.db_path)
         try:
-            pages = db.list_wiki_pages(query=q, page_type=type, limit=limit)
-            total = db.count_wiki_pages(query=q, page_type=type)
+            if q.strip() and re.search(r"[\u3400-\u9fff]", q):
+                # The SQL title index uses original names; include Chinese display aliases.
+                all_pages = [localized(row) for row in db.list_wiki_pages(page_type=type, limit=100000)]
+                found = [item for item in all_pages if q.casefold() in
+                         (item["title"] + " " + item["display_title"]).casefold()]
+                total = len(found)
+                pages = found[:limit]
+            else:
+                pages = [localized(row) for row in db.list_wiki_pages(query=q, page_type=type, limit=limit)]
+                total = db.count_wiki_pages(query=q, page_type=type)
         finally:
             db.close()
-        return {
-            "items": [{**page, "path": _relative_name(config.root, str(page.get("path") or ""))} for page in pages],
-            "total": total,
-        }
+        return {"items": pages, "total": total}
 
     @app.get("/api/wiki/pages/{page_id}")
     def get_wiki_page(page_id: int) -> Dict[str, Any]:
@@ -606,6 +680,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             raise HTTPException(status_code=404, detail="Wiki page not found")
         page["path"] = _relative_name(config.root, str(page.get("path") or ""))
         metadata = parse_frontmatter(str(page.get("content") or ""))
+        page["display_title"] = str(metadata.get("display_title") or page["title"])
         declared_sources = metadata.get("sources") or []
         if not isinstance(declared_sources, list):
             declared_sources = []
@@ -777,6 +852,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "configured": llm.enabled,
                 "timeout_seconds": llm.timeout_seconds,
             },
+            "wiki": {"language": config.wiki_language, "original_text_preserved": True},
             "retrieval": {
                 "top_k": config.top_k,
                 "graph_expansion": bool(config.retrieval.get("graph_expansion", True)),
