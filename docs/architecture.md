@@ -101,15 +101,15 @@ data/researchwiki.db  ←── 派生投影（索引、关系、证据、图谱
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 表现层   web/static/{index.html,app.js,styles.css}          │
-│          8 视图单页工作台   ｜   cli.py  (rw 命令, 12 子命令) │
+│          阅读型工作台   ｜   cli.py  (rw 命令) │
 ├─────────────────────────────────────────────────────────────┤
-│ 接口层   web/app.py   FastAPI, 28 个唯一路径, SSE           │
+│ 接口层   web/app.py   FastAPI, 本地 API, SSE           │
 ├─────────────────────────────────────────────────────────────┤
 │ 编排层   app.py       ingest / rebuild / delete_source      │
 │                       do_search / do_ask / initialize       │
 ├─────────────────────────────────────────────────────────────┤
 │ 能力层   parsing  extraction  llm  wiki                     │
-│          index    retrieval   qa   graph   evaluation       │
+│          index    retrieval   qa   graph       │
 ├─────────────────────────────────────────────────────────────┤
 │ 存储层   wiki/**/*.md  ｜  data/researchwiki.db  ｜  raw/    │
 ├─────────────────────────────────────────────────────────────┤
@@ -133,12 +133,11 @@ data/researchwiki.db  ←── 派生投影（索引、关系、证据、图谱
 | 提示词 | `extraction/prompts.py` | 抽取、分析、问答三套 system prompt |
 | LLM | `llm/client.py` | 零 SDK 依赖的 OpenAI 兼容客户端 + JSON 容错解析 |
 | Wiki | `wiki/manager.py` | Markdown 编译、staging 原子提交、用户笔记保护、可恢复删除 |
-| 索引 | `index/database.py` | 12 张业务表、FTS5、中文兜底、证据定位、图谱落库 |
+| 索引 | `index/database.py` | SQLite 业务表、FTS5、中文兜底、证据定位、图谱落库 |
 | 检索 | `retrieval/search.py` | 三路召回 + RRF 融合 |
 | 向量 | `retrieval/vector.py` | 可选 embedding 客户端 + 余弦检索 + 增量同步 |
 | 问答 | `qa/engine.py` + `qa/context.py` | 上下文预算装配 + 三态回答 |
 | 图谱 | `graph/extractor.py` | 确定性投影 + 校验 + digest |
-| 评估 | `evaluation/runner.py` | 固定题库重放 + 四指标 |
 | 编排 | `app.py` | 把上述能力串成流水线 |
 | 接口 | `web/app.py` / `cli.py` | HTTP 与命令行两个入口 |
 
@@ -244,7 +243,6 @@ section      = "ELAM"  或  "source excerpt (fallback)"
 | `reviews` | 质量审核项 | 去重：`(kind,message,source_id,page_path)` |
 | `embeddings` | 页面向量 | `page_id` 主键，`content_hash` 做增量判断 |
 | `graph_nodes` / `graph_edges` / `graph_runs` | 图谱契约与历史 | 边 `UNIQUE(source,target,semantic)` |
-| `evaluation_runs` / `evaluation_cases` | 评估历史 | 按 profile 索引 |
 | `aliases` | 实体别名 | 已建表，**当前未使用** |
 
 **注意** `idx_jobs_one_active_source` 是一个**部分唯一索引**：
@@ -759,9 +757,6 @@ Do not fabricate page numbers or claims.
 | **检索** | `GET /api/search?q=&top_k=` | 混合检索 |
 | **问答** | `POST /api/ask` | 结构化返回（mode/sources/context） |
 | | `POST /api/ask/stream` | SSE：`status` → `status` → `result` |
-| **评估** | `GET /api/evaluation/questions` | 题库 |
-| | `GET /api/evaluation/runs`、`GET .../{run_id}` | 历史与明细 |
-| | `POST /api/evaluation/run?profile=` | 运行评估 |
 | **设置** | `GET /api/settings` | 只读展示模型与检索配置 |
 | | `POST /api/settings/test` | 真实最小连接测试 |
 | **页面** | `GET /` | 工作台入口 |
@@ -820,7 +815,7 @@ def generate():
 
 **诚实的说明：这是状态事件流，不是 token 流。** 答案是一次性生成的，SSE 只推送阶段进展。README 的当前边界里也明确写了"没有流式回答"。
 
-### 7.4 CLI（12 个子命令）
+### 7.4 CLI（常用命令）
 
 ```bash
 rw init                        # 建 raw/wiki/schema/data/logs + 首次建库
@@ -830,7 +825,6 @@ rw search QUERY [--top-k N]
 rw ask QUESTION [--top-k N]
 rw build                       # 从 Markdown 重建索引 + 证据 + 图谱 + Review
 rw graph                       # 只重投影图谱
-rw eval --profile baseline|optimized
 rw jobs [--status STATUS]
 rw reviews [--status STATUS]
 rw delete SOURCE_ID --yes [--keep-raw]
@@ -840,24 +834,17 @@ rw --root /path/to/workspace web        # 全局参数必须在子命令前
 
 `rw parse` 是一个**重要的调试工具**：它只跑解析 + 抽取并打印 JSON，不碰 Wiki。调整提示词时用它验证效果，不会污染知识库。
 
-### 7.5 浏览器工作台（8 视图）
+### 7.5 浏览器工作台（五项主导航）
 
-| # | 视图 | 主要能力 |
-|---|---|---|
-| 01 | 知识工作台 | 统计、队列、质量警告、数据流示意 |
-| 02 | 资料中心 | 上传、搜索、筛选、抽取详情、原文下载、失败重试 |
-| 03 | Wiki 页面 | 浏览四类页面、来源证据（页码/字符区间/摘录）、相关推荐 |
-| 04 | 知识图谱 | 搜索、类型显隐、缩放、详情、重新抽取 |
-| 05 | 证据问答 | SSE 状态、编号引用、可定位证据 |
-| 06 | 质量评估 | baseline/optimized 回放与指标对比 |
-| 07 | Review 队列 | 集中处理质量问题 |
-| 08 | 系统设置 | 只读配置展示 + 真实连接测试 |
+| 主入口 | 主要用途 |
+|---|---|
+| 资料库 | 导入、抽取、状态与待核对提醒 |
+| 知识 Wiki | Paper / Topic / Method / Dataset 的阅读与来源证据 |
+| 知识图谱 | 四类科研对象的局部与全局关系 |
+| 研究问答 | 引用原文证据的科研提问 |
+| 设置 | 本地 DeepSeek Key 管理、模型连接测试与阅读语言 |
 
-前端是**零构建步骤**的原生 JS（`app.js` 595 行 + `index.html` 211 行 + `styles.css` 269 行），浏览器只调用同源 `/api/*`。这个选择很务实：本地工具不该要求 Node 工具链。
-
----
-
-## 8. 四个派生契约
+编译、审核与检索诊断放在高级区域，普通阅读界面不包含固定题库或自动评分。
 
 ### 8.1 FTS5 索引
 
@@ -947,48 +934,6 @@ else:
 **共享实体不会被误删**：如果一个方法页被 3 篇论文引用，删除其中 1 篇只会移除那 1 篇的段落和 frontmatter 中的哈希。同样，**只要用户写过笔记，页面就永不自动删除**。
 
 `manifest.json` 记录了完整的删除上下文（源记录、论文记录、Wiki 变更、移动的文件列表），使操作可审计、可手工还原。
-
-### 8.4 评估：可重放的质量基线
-
-固定题库（`evaluation/questions.json`）包含一道**必拒答题**：
-
-```json
-{"id": "reject", "question": "__researchwiki_out_of_scope_quantum_volcano_7391__", "expected_no_evidence": true}
-```
-
-四个指标（`runner.py:44`）：
-
-```python
-retrieval_hit            = rejected if expected_no_evidence else bool(sources)   # 该召回的召回了？
-rejection_accuracy       = (rejected == expected_no_evidence)                    # 该拒答的拒答了？
-grounded_answer          = rejected or bool(sources)                             # 有据可依？
-source_locator_coverage  = len(located)/len(provenance)  # located = 同时有 locator 和 evidence_text
-```
-
-总分 = 四项平均 × 100。
-
-两个 profile 的差异：
-
-| profile | 检索路径 |
-|---|---|
-| `baseline` | `database.search(q, top_k=5)` 纯词法 |
-| `optimized` | `search(db, q, top_k=8, graph_expansion=True)` 混合 + 图扩展 |
-
-**全程 `llm=None`** —— 零模型费用、完全确定性，所以它可以进 CI 当回归测试。
-
-实测对比（本仓库真实数据）：
-
-| 指标 | baseline | optimized |
-|---|---|---|
-| retrieval_hit | 0.8 | 0.8 |
-| rejection_accuracy | 0.8 | 0.8 |
-| grounded_answer | 1.0 | 1.0 |
-| **source_locator_coverage** | **0.4** | **1.0** |
-| **score** | **75.0** | **90.0** |
-
-图扩展把来源定位覆盖率从 40% 提升到 100%。**改进被量化记录下来，而不是靠感觉说"更好了"。**
-
----
 
 ## 9. 质量、信任与边界
 
@@ -1299,7 +1244,7 @@ ingest_jobs.stage:
 2. 若 provider 不在已知表中，按 `<PROVIDER>_API_KEY` 命名环境变量（`llm/client.py:28` 和 `config.py:173` 两处映射表都要加，否则配置层读不到）；
 3. 若有非标准行为（如只接受特定 temperature），加在 `_effective_temperature`。
 
-**不需要改的地方**：抽取、问答、评估全部通过 `LLMClient` 抽象，不感知 provider。
+**不需要改的地方**：抽取和问答通过 `LLMClient` 抽象，不感知 provider。
 
 ### 12.2 新增 Wiki 页面类型
 
@@ -1327,16 +1272,9 @@ class ParsedDocument:
 
 三个权重都在 `retrieval/search.py:31-48`，是字面量。图扩展的打分在 `database.py:760-779`。
 
-调完务必跑 `rw eval --profile optimized` 对比——**这是本仓库唯一被授权的"改了就验证"机制**，能从 `evaluation_runs` 表看到历史曲线。
+调整检索权重后使用 `python -m pytest -q` 测试基本检索与引用行为，并对真实论文查询进行人工核对。
 
-### 12.5 新增评估指标
-
-1. `evaluation/runner.py:_case_metrics` 加字段；
-2. `metric_names` 元组加同名（`runner.py:108`），否则不会被聚合；
-3. `evaluation_runs.metrics` 是 JSON 列，**无需改表结构**；
-4. `evaluation_cases.metrics` 同理。
-
-### 12.6 新增 API 端点
+### 12.5 新增 API 端点
 
 在 `web/app.py:create_app` 内加装饰器函数即可。注意三条纪律：
 
@@ -1405,11 +1343,10 @@ wiki/papers/Uncertainty-aware-evidential-learning-for-legal-case-...md  ← 正�
 
 | 项目 | 结果 |
 |---|---|
-| 测试套件 | **11 passed**（0.52s） |
+| 测试套件 | 请以最新 CI 结果为准 |
 | 索引 | 21 页面 / 36 链接 / FTS5 21 行 |
 | 证据定位覆盖 | **21/21 全部有 locator + 页码 + 字符区间 + 摘录** |
 | 图谱 | 27 节点 / 78 边；两次运行 digest 一致 `66044b87...` |
-| 评估 | baseline 75.0 → optimized 90.0（定位覆盖率 0.4 → 1.0） |
 | 检索（中文自然语言） | ✅ 命中正确论文页 |
 | 问答（带引用） | ✅ 正确识别单篇相关论文，并如实说明其余主题页证据不足 |
 
@@ -1436,7 +1373,6 @@ wiki/papers/Uncertainty-aware-evidential-learning-for-legal-case-...md  ← 正�
 | `researchwiki/qa/context.py` | 66 | `assemble_context` |
 | `researchwiki/qa/engine.py` | 178 | `answer`、`answer_with_metadata` |
 | `researchwiki/graph/extractor.py` | 108 | `extract_graph` |
-| `researchwiki/evaluation/runner.py` | 116 | `run_evaluation`、`load_questions` |
 | `researchwiki/web/app.py` | 727 | `create_app`（28 路径） |
 | `researchwiki/web/static/*` | 1075 | 工作台前端 |
 
@@ -1489,14 +1425,12 @@ rw ask "这些论文怎样处理标签噪声" --top-k 4
 # 重建与验证
 rw build                                # 索引 + 证据 + 图谱 + Review
 rw graph                                # 只重投影图谱
-rw eval --profile baseline
-rw eval --profile optimized
 
 # 运维
 rw jobs --status FAILED
 rw reviews
 rw delete <source_id> --yes
-python -m pytest -q                     # 11 passed
+python -m pytest -q                     # 回归测试，以 CI 结果为准
 ```
 
 ### 14.4 相关文档
