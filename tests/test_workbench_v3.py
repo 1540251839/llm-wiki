@@ -74,11 +74,7 @@ def test_compile_evidence_backlinks_and_frozen_replay(tmp_path):
             response = client.get(f"/api/documents/{source_id}/file?inline=true")
             assert response.headers["content-disposition"].startswith("inline")
             assert client.get(f"/api/documents/{source_id}/evidence?page=999").status_code == 422
-            comparison = client.post("/api/evaluation/compare").json()
-            assert comparison["baseline"]["metrics"]["corpus_fingerprint"] == comparison["optimized"]["metrics"]["corpus_fingerprint"]
-            replay = client.post(f"/api/evaluation/runs/{comparison['optimized']['id']}/replay").json()
-            assert replay["score"] == comparison["optimized"]["score"]
-            assert replay["metrics"]["replay_of"] == comparison["optimized"]["id"]
+            assert client.post("/api/evaluation/compare").status_code == 404
             assert raw.read_bytes() == before
             raw.write_text("tampered source")
             assert client.get(f"/api/documents/{source_id}/evidence").status_code == 409
