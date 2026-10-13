@@ -25,6 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     ingest_cmd = sub.add_parser("ingest", help="import a paper and update the Wiki")
     ingest_cmd.add_argument("paper")
     ingest_cmd.add_argument("--resume", action="store_true", help="re-run an existing/failed import")
+    ingest_cmd.add_argument("--fresh", action="store_true", help="ignore old checkpoints and regenerate (may incur API fees)")
     ingest_cmd.add_argument("--quality", choices=("basic", "standard", "high"), default=None, help="basic=offline (default), standard=deep, high=two-pass deep")
     search_cmd = sub.add_parser("search", help="search indexed Wiki pages")
     search_cmd.add_argument("query")
@@ -32,6 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     ask_cmd = sub.add_parser("ask", help="answer a question from retrieved Wiki pages")
     ask_cmd.add_argument("question")
     ask_cmd.add_argument("--top-k", type=int, default=None)
+    ask_cmd.add_argument("--evidence-scope", choices=("hybrid", "wiki"), default="hybrid")
     synth_cmd = sub.add_parser("synthesize", help="optional LLM synthesis of at least two deep-extracted papers on a topic")
     synth_cmd.add_argument("topic", help="exact research topic page title")
     sub.add_parser("build", help="rebuild the Wiki index and page links")
@@ -65,7 +67,8 @@ def main(argv: Any = None) -> None:
         elif args.command == "parse":
             print(json.dumps(parse_only(config, args.paper, mode="standard" if args.deep else "basic").to_dict(), ensure_ascii=False, indent=2))
         elif args.command == "ingest":
-            result = ingest(config, args.paper, resume=args.resume, quality_mode=args.quality)
+            result = ingest(config, args.paper, resume=args.resume or args.fresh,
+                            quality_mode=args.quality, force_refresh=args.fresh)
             if result["status"] == "already_exists":
                 print("Already exists: " + str(result["title"]))
             else:
@@ -80,7 +83,7 @@ def main(argv: Any = None) -> None:
             for index, result in enumerate(results, 1):
                 print(f"{index}. [{result['type']}] {result['title']} — {result['path']}")
         elif args.command == "ask":
-            print(do_ask(config, args.question, args.top_k))
+            print(do_ask(config, args.question, args.top_k, evidence_scope=args.evidence_scope))
         elif args.command == "synthesize":
             from .extraction.synthesis import synthesize_topic
             from .compilation import CompilationService

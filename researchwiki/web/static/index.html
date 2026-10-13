@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light dark" />
     <title>ResearchWiki · 可追溯研究知识库</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%236ea8ff'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='sans-serif' font-size='22' font-weight='700' fill='white'%3ERW%3C/text%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="/assets/styles.css?v=20261013-source-first-1" />
+    <link rel="stylesheet" href="/assets/styles.css?v=20261013-graph-3" />
   </head>
   <body>
     <div class="shell">
@@ -153,6 +153,7 @@
               <div id="ask-phases" class="ask-phases" aria-live="polite"></div>
               <div id="ask-result" class="answer empty-state"><strong>从一个研究问题开始</strong><p>比较方法、寻找数据集，或检查一条研究结论。<br>引用编号会带你定位到右侧原文证据。</p><button class="suggested-question" data-question="这些论文使用了哪些数据集？">这些论文使用了哪些数据集？ ↗</button><button class="suggested-question" data-question="这些研究有哪些局限性？">这些研究有哪些局限性？ ↗</button></div>
               <form id="ask-form">
+                <label for="ask-evidence-scope">证据范围 <select id="ask-evidence-scope"><option value="hybrid">Wiki ＋ 原文</option><option value="wiki">仅已支持 Wiki</option></select></label>
                 <textarea id="ask-input" rows="3" minlength="2" maxlength="4000" placeholder="提问，例如：这些论文如何处理标签噪声？" required></textarea>
                 <div class="ask-actions"><span id="ask-mode">没有证据时将明确拒答</span><div class="top-actions"><button class="secondary hidden" id="ask-stop" type="button">停止</button><button class="primary" id="ask-submit" type="submit">检索并回答 ↗</button></div></div>
               </form>
@@ -163,26 +164,58 @@
 
         <section class="view" id="view-graph">
           <div class="graph-toolbar panel">
-            <label class="search-field"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索节点" /></label>
-            <div id="graph-type-filters" class="graph-filters"></div>
-            <select id="graph-edge-filter" aria-label="图谱关系类型"><option value="">全部关系</option></select>
-            <button class="secondary" id="graph-global">全局图</button>
-            <button class="secondary" id="graph-enable-g6" title="需联网加载 G6，离线仍可使用本地图谱">G6 力导向（可选）</button>
-            <button class="secondary" id="graph-zoom-out">－</button>
-            <button class="secondary" id="graph-reset">复位</button>
-            <button class="secondary" id="graph-zoom-in">＋</button>
-            <button class="primary" id="graph-extract">重新抽取</button>
+            <div class="graph-filter-row">
+              <label class="search-field"><span aria-hidden="true">⌕</span><input id="graph-search" type="search" placeholder="查找论文、方法、数据集…" aria-label="搜索图谱节点" /></label>
+              <div id="graph-type-filters" class="graph-filters" role="group" aria-label="当前视图的知识对象类型"></div>
+              <select id="graph-edge-filter" aria-label="图谱关系类型"><option value="">全部关系</option></select>
+            </div>
+            <div class="graph-tool-row">
+              <p class="graph-toolbar-note"><span class="graph-live-dot" aria-hidden="true"></span><span id="graph-status" role="status" aria-live="polite">从论文与证据中连接知识</span></p>
+              <div class="graph-view-actions">
+                <button class="secondary" id="graph-global">查看全部论文</button>
+                <button class="secondary" id="graph-enable-g6" title="需联网加载 G6，离线仍可使用本地图谱">G6 力导向（可选）</button>
+                <button class="primary" id="graph-extract" title="用已有知识对象重建关系，不调用模型">重建关系</button>
+              </div>
+            </div>
           </div>
           <div class="graph-stats" id="graph-stats"></div>
-          <div class="graph-legend"><span>默认显示一跳关系 · 选择节点可展开邻居 · G6 需主动启用</span><span id="graph-visible-count"></span></div>
+          <p class="graph-library-note" id="graph-library-note" role="status"></p>
+          <section class="panel graph-paper-list hidden" id="graph-paper-list" aria-label="全库论文导航"></section>
           <div class="graph-layout">
-            <article class="panel graph-panel"><div id="graph-g6" class="graph-g6 hidden" aria-label="G6 科研关系图"></div><svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="科研知识图谱画布"></svg></article>
-            <aside class="panel graph-detail" id="graph-detail"><div class="empty-state">选择节点查看字段、证据与连接。</div></aside>
+            <article class="panel graph-panel">
+              <div class="graph-stage-head">
+                <div class="graph-stage-heading"><p class="eyebrow">RESEARCH CONNECTIONS</p><h3 id="graph-stage-title">研究知识全景</h3><p id="graph-stage-subtitle">查看全库论文、方法、主题与数据集。</p></div>
+                <span class="graph-view-badge" id="graph-view-badge">全局 · 全部对象</span>
+              </div>
+              <div class="graph-stage-body">
+                <div id="graph-g6" class="graph-g6 hidden" aria-label="G6 科研关系图"></div>
+                <svg id="graph-canvas" viewBox="0 0 1000 680" role="img" aria-label="科研知识图谱画布"></svg>
+                <div id="graph-empty-status" class="graph-empty-status hidden" role="status"></div>
+                <div class="graph-canvas-controls" role="group" aria-label="图谱缩放">
+                  <button class="secondary" id="graph-zoom-out" title="缩小" aria-label="缩小图谱">−</button>
+                  <button class="secondary" id="graph-reset" title="复位画布">复位</button>
+                  <button class="secondary" id="graph-zoom-in" title="放大" aria-label="放大图谱">＋</button>
+                </div>
+              </div>
+              <div class="graph-stage-foot">
+                <div class="graph-type-legend" aria-label="知识对象颜色图例"><span data-type="paper"><i></i>论文</span><span data-type="method"><i></i>方法</span><span data-type="dataset"><i></i>数据集</span><span data-type="topic"><i></i>主题</span></div>
+                <span id="graph-visible-count"></span>
+              </div>
+            </article>
+            <aside class="panel graph-detail" id="graph-detail"><div class="graph-detail-empty"><span class="graph-detail-symbol" aria-hidden="true">↗</span><p class="eyebrow">KNOWLEDGE INSPECTOR</p><h3>从一个知识对象开始</h3><p>点击节点查看关联关系，阅读 Wiki，并回到原文证据。</p><small>拖动画布移动 · Ctrl/⌘ + 滚轮缩放<br>选择对象后可展开一跳关系</small></div></aside>
           </div>
           <details class="advanced-details"><summary>高级：检查检索索引</summary><article class="panel table-panel retrieval-panel"><div class="section-head"><div><p class="eyebrow">RETRIEVAL OBJECTS</p><h3>检索检查</h3></div><span class="truth-label">当前真实索引</span></div><form id="retrieval-form" class="toolbar"><label class="search-field"><input id="retrieval-input" type="search" required maxlength="500" placeholder="输入关键词，检查问答实际可用的知识页" /></label><button class="primary" type="submit">检索</button></form><div id="retrieval-results" class="retrieval-results"><div class="empty-state">查看命中的主题、得分与证据来源。</div></div></article></details>
         </section>
 
         <section class="view" id="view-reviews">
+          <article class="panel table-panel">
+            <div class="section-head">
+              <div><p class="eyebrow">VERIFIED CLAIMS</p><h3>论断与原文审核</h3><small id="claim-summary"></small></div>
+              <select id="claim-status" aria-label="筛选论断审核状态"><option value="">全部状态</option><option value="pending_review">待人工审核</option><option value="supported">已支持</option><option value="insufficient">证据不足</option><option value="contradicted">被反驳</option></select>
+            </div>
+            <p class="aside-note">定位成功不等于支持结论。只有已支持论断进入事实 Wiki；修改或重算后需重新核验。</p>
+            <div id="claim-list"></div>
+          </article>
           <article class="panel table-panel">
             <div class="section-head">
               <div><p class="eyebrow">HUMAN IN THE LOOP</p><h3>待审核问题</h3></div>
@@ -197,12 +230,12 @@
             <article class="panel table-panel">
               <p class="eyebrow">MODEL CONNECTION</p>
               <h3>配置 DeepSeek API</h3>
-              <p class="muted">基础论文抽取完全离线；深度分析、跨论文综合与模型问答需要 API Key。</p>
+              <p class="muted">快速导入与原文检索完全离线；深度解读默认覆盖全文分块，支持 JSON 重试与断点恢复。高质量模式先分析再抽取，调用次数更多。模型问答和跨论文综合需 API Key。</p>
               <div id="settings-model" class="settings-list"></div>
               <form id="deepseek-key-form" autocomplete="off" class="settings-form">
                 <label for="deepseek-key">DeepSeek API Key</label>
                 <input id="deepseek-key" name="api_key" type="password" placeholder="输入新的 Key（不会显示已有 Key）" autocomplete="new-password" minlength="8" maxlength="512" required />
-                <small>保存在本机私有文件中，不发送给浏览器以外的服务（测试连接时会发送到 DeepSeek）。不要将项目的私密文件加入 Git。</small>
+                <small>保存在本机私有文件中，接口不会回显已有密钥；仅在模型调用时发送给已配置的模型服务。不要将私密文件加入 Git。</small>
                 <div class="settings-actions">
                   <button type="submit" class="primary" id="save-model-key">保存密钥</button>
                   <button type="button" class="secondary" id="test-model">测试连接</button>
@@ -245,9 +278,10 @@
         <label class="mode-field">处理模式
           <select id="quality-mode" name="quality_mode">
             <option value="basic">快速导入（默认，离线建立全文索引）</option>
-            <option value="standard">深度解读（调用模型生成中文 Wiki）</option>
+            <option value="standard">完整分块深度解读（模型抽取＋证据核验）</option>
+            <option value="high">高质量深读（逐块先分析再抽取，调用更多）</option>
           </select>
-          <small>快速导入直接保存原文并建立检索索引；深度解读补充研究问题、方法和实验信息。长文优先取重要章节，完整分块机制仍由独立的高级处理实现。</small>
+          <small>快速导入离线保存原文并建立全文索引，不生成研究结论。深度解读默认完整分块、不省略长文中段，支持截断检测、JSON 格式重试和断点恢复；仅已支持论断进入事实 Wiki。</small>
         </label>
         <div class="dialog-actions"><button class="secondary" id="upload-cancel" type="button">取消</button><button class="primary" id="upload-submit" type="submit">上传并处理</button></div>
         <p id="upload-message" class="form-message"></p>
@@ -262,6 +296,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/assets/app.js?v=20261013-source-first-1" defer></script>
+    <script src="/assets/app.js?v=20261013-graph-3" defer></script>
   </body>
 </html>

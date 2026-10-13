@@ -213,7 +213,7 @@ def extract_basic(
             datasets.append(EntityMention(
                 name=name, role="文中提及；是否实际用于实验需要复核"
             ))
-    return StructuredPaper(
+    result = StructuredPaper(
         title=_title_from_lines(head, source_path),
         authors=_authors(head),
         year=_year(head),
@@ -221,4 +221,15 @@ def extract_basic(
         keywords=_keywords(head),
         datasets=datasets,
         extraction_mode="basic",
+        quality=dict(document.quality),
     )
+    result.quality["issues"] = list(result.quality.get("issues", []))
+    if result.title == "Untitled Paper":
+        result.quality["issues"].append({"code": "uncertain_title", "severity": "warning",
+            "message": "未能从原文可靠识别论文标题；保留原件，请人工核对，不用文件名或期刊页眉充当标题。"})
+    missing = [name for name in ("authors", "year", "abstract", "keywords") if not getattr(result, name)]
+    result.quality["missing_metadata"] = missing
+    if missing:
+        result.quality["issues"].append({"code": "missing_metadata", "severity": "warning",
+            "message": "基础资料缺少字段（" + ", ".join(missing) + "）；保持为空，未调用模型补造。"})
+    return result

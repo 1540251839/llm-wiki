@@ -342,7 +342,9 @@ updated_at: {_yaml_value(now_iso())}
         return paper_path, entity_paths
 
     def ingest(self, paper: StructuredPaper, raw_path: str) -> Tuple[Path, List[Path]]:
-        """Prepare all generated pages in isolation, then commit them together.
+        """Legacy formatter, not a verifier or production factual ingestion path.
+
+        Production uses the compilation service and independently verified Claims.
 
         Individual file replacement is atomic. If any replacement fails, already
         replaced files are restored from their pre-commit contents.

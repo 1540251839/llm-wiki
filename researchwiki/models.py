@@ -11,9 +11,25 @@ class Page:
 
 
 @dataclass
+class DocumentBlock:
+    """A parser-owned physical-page span, never a model-supplied locator."""
+    block_id: str
+    page: int
+    section: str
+    block_type: str
+    text: str
+    bbox: Optional[List[float]] = None
+    char_start: int = 0
+    char_end: int = 0
+    parser_version: str = ""
+
+
+@dataclass
 class ParsedDocument:
     text: str
     pages: List[Page] = field(default_factory=list)
+    blocks: List[DocumentBlock] = field(default_factory=list)
+    quality: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,6 +66,9 @@ class StructuredPaper:
     field_evidence: List[Dict[str, Any]] = field(default_factory=list)
     source_path: str = ""
     source_hash: str = ""
+    claims: List[Dict[str, Any]] = field(default_factory=list)
+    extraction_meta: Dict[str, Any] = field(default_factory=dict)
+    quality: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -105,5 +124,8 @@ class StructuredPaper:
             field_evidence=[dict(x) for x in (data.get("field_evidence") or []) if isinstance(x, dict)],
             source_path=str(data.get("source_path") or ""),
             source_hash=str(data.get("source_hash") or ""),
+            claims=[dict(value) for value in (data.get("claims") or []) if isinstance(value, dict)],
+            extraction_meta=dict(data.get("extraction_meta") or {}) if isinstance(data.get("extraction_meta"), dict) else {},
+            quality=dict(data.get("quality") or {}) if isinstance(data.get("quality"), dict) else {},
         )
 

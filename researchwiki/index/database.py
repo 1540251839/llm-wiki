@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
@@ -71,6 +73,10 @@ def _is_placeholder_page(content: str) -> bool:
     )
 
 
+class IngestJobConflict(ValueError):
+    """A source already has a different active processing request."""
+
+
 class Database:
     def __init__(self, path: Union[str, Path]):
         self.path = Path(path)
@@ -88,6 +94,9 @@ class Database:
 
     def _init_schema(self) -> None:
         self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS workspace_meta (
+          key TEXT PRIMARY KEY, value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS papers (
           id TEXT PRIMARY KEY, title TEXT NOT NULL, authors TEXT, year INTEGER,
           source_path TEXT, raw_path TEXT, status TEXT NOT NULL,
@@ -141,6 +150,12 @@ class Database:
           created_at TEXT,
           PRIMARY KEY(page_id, source_id)
         );
+        CREATE TABLE IF NOT EXISTS page_evidence (
+          page_id INTEGER NOT NULL, claim_id TEXT NOT NULL, source_id TEXT NOT NULL,
+          source_path TEXT, locator TEXT, page_number INTEGER, paragraph INTEGER,
+          char_start INTEGER, char_end INTEGER, evidence_text TEXT, confidence TEXT,
+          verification_status TEXT, PRIMARY KEY(page_id,claim_id)
+        );
         CREATE TABLE IF NOT EXISTS reviews (
           id INTEGER PRIMARY KEY AUTOINCREMENT, source_id TEXT,
           page_id INTEGER, page_path TEXT, kind TEXT NOT NULL,
@@ -187,7 +202,22 @@ class Database:
         CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(type,name);
         CREATE INDEX IF NOT EXISTS idx_graph_edges_semantic ON graph_edges(semantic,source,target);
         """)
+        self.conn.execute("INSERT OR IGNORE INTO workspace_meta(key,value) VALUES('library_id',?)", (uuid.uuid4().hex,))
+        self.library_id = str(self.conn.execute("SELECT value FROM workspace_meta WHERE key='library_id'").fetchone()[0])
         paper_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(papers)")}
+        job_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(ingest_jobs)")}
+        for name, kind in (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("stage_timings", "TEXT NOT NULL DEFAULT '{}'"),
+                           ("force_refresh", "INTEGER NOT NULL DEFAULT 0"), ("operation", "TEXT NOT NULL DEFAULT 'ingest'"),
+                           ("focus", "TEXT NOT NULL DEFAULT ''")):
+            if name not in job_columns:
+                self.conn.execute("ALTER TABLE ingest_jobs ADD COLUMN " + name + " " + kind)
+        page_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(wiki_pages)")}
+        if "content_hash" not in page_columns:
+            self.conn.execute("ALTER TABLE wiki_pages ADD COLUMN content_hash TEXT")
+        source_chunk_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(source_chunks)")}
+        for name in ("source_hash", "parser_version", "page_digest"):
+            if name not in source_chunk_columns:
+                self.conn.execute("ALTER TABLE source_chunks ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''")
         if "error_message" not in paper_columns:
             self.conn.execute("ALTER TABLE papers ADD COLUMN error_message TEXT")
         page_source_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(page_sources)")}
@@ -280,13 +310,22 @@ class Database:
             "SELECT count(*) FROM source_chunks WHERE source_id=?", (source_id,)
         ).fetchone()[0])
 
-    def index_source_chunks(self, source_id: str, pages: Iterable[Any]) -> int:
+    def index_source_chunks(self, source_id: str, pages: Iterable[Any], parser_version: str = "") -> int:
         """Replace one source's exact page slices (never calls an LLM).
 
         A separate source index is deliberately independent of generated Wiki
         pages. Deep enrichment cannot silently hide unquoted source content.
         """
+        pages = list(pages)
         entries = list(source_chunks(pages))
+        from ..parsing.pdf import PARSER_VERSION, TEXT_PARSER_VERSION
+        source = self.get_source(source_id)
+        raw = Path(str((source or {}).get("raw_path") or ""))
+        parser_version = parser_version or (PARSER_VERSION if raw.suffix.lower() == ".pdf" else TEXT_PARSER_VERSION)
+        source_hash = str((source or {}).get("sha256") or source_id)
+        if not raw.is_file() or hashlib.sha256(raw.read_bytes()).hexdigest() != source_hash:
+            raise ValueError("Source original is missing or its hash changed")
+        digests = {int(page.number): hashlib.sha256(str(page.text or "").encode("utf-8")).hexdigest() for page in pages}
         if len(entries) > 20000:
             raise ValueError("Source exceeds the 20000 chunk index limit")
         with self.conn:
@@ -302,10 +341,11 @@ class Database:
             self.conn.execute("DELETE FROM source_chunks WHERE source_id=?", (source_id,))
             for item in entries:
                 cursor = self.conn.execute(
-                    """INSERT INTO source_chunks(source_id,page_number,chunk_index,char_start,char_end,content)
-                       VALUES(?,?,?,?,?,?)""",
+                    """INSERT INTO source_chunks(source_id,page_number,chunk_index,char_start,char_end,content,source_hash,parser_version,page_digest)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
                     (source_id, item["page_number"], item["chunk_index"],
-                     item["char_start"], item["char_end"], item["content"]),
+                     item["char_start"], item["char_end"], item["content"], source_hash,
+                     parser_version, digests[item["page_number"]]),
                 )
                 if self.source_fts_available:
                     self.conn.execute(
@@ -333,7 +373,7 @@ class Database:
         if not text:
             return []
         limit = max(1, min(40, limit))
-        conditions = ["p.status='INDEXED'", "s.deleted_at IS NULL"]
+        conditions = ["COALESCE(p.status,'')<>'DELETED'", "s.deleted_at IS NULL"]
         params: List[Any] = []
         if source_id:
             conditions.append("c.source_id=?")
@@ -341,9 +381,9 @@ class Database:
         where = " AND ".join(conditions)
         prefix = (
             "SELECT c.source_id,c.page_number,c.chunk_index,c.char_start,c.char_end,"
-            "c.content,p.title,s.original_name "
+            "c.content,c.source_hash,c.parser_version,c.page_digest,p.title,s.original_name,s.raw_path,s.sha256 "
             "FROM source_chunks c "
-            "JOIN papers p ON p.id=c.source_id "
+            "LEFT JOIN papers p ON p.id=c.source_id "
             "JOIN sources s ON s.id=c.source_id "
         )
         rows = []
@@ -356,7 +396,7 @@ class Database:
                         prefix + "JOIN source_chunks_fts ON source_chunks_fts.rowid=c.id "
                         "WHERE source_chunks_fts MATCH ? AND " + where +
                         " ORDER BY bm25(source_chunks_fts),c.source_id,c.page_number,c.chunk_index LIMIT ?",
-                        [expression, *params, limit],
+                        [expression, *params, min(limit * 4, 160)],
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = []
@@ -366,23 +406,62 @@ class Database:
             rows = self.conn.execute(
                 prefix + "WHERE " + where + " AND c.content LIKE ? "
                 "ORDER BY c.source_id,c.page_number,c.chunk_index LIMIT ?",
-                [*params, "%" + text + "%", limit],
+                [*params, "%" + text + "%", min(limit * 4, 160)],
             ).fetchall()
         result: List[Dict[str, Any]] = []
+        validated: Dict[str, Any] = {}
         for row in rows:
             item = dict(row)
             content = item.pop("content")
+            source_key = str(item["source_id"])
+            if source_key not in validated:
+                try:
+                    raw = Path(str(item.get("raw_path") or ""))
+                    if not raw.is_file() or hashlib.sha256(raw.read_bytes()).hexdigest() != str(item.get("sha256") or ""):
+                        validated[source_key] = None
+                    else:
+                        from ..parsing.pdf import parse_file, PARSER_VERSION, TEXT_PARSER_VERSION
+                        parsed = parse_file(raw)
+                        version = PARSER_VERSION if raw.suffix.lower() == ".pdf" else TEXT_PARSER_VERSION
+                        validated[source_key] = ({int(page.number): page.text for page in parsed.pages}, version)
+                except (OSError, ValueError, RuntimeError):
+                    validated[source_key] = None
+            original = validated[source_key]
+            if original is None or item.get("source_hash") != item.get("sha256") or item.get("parser_version") != original[1]:
+                continue
+            page_text = original[0].get(int(item["page_number"]), "")
+            start, stop = int(item["char_start"]), int(item["char_end"])
+            if not 0 <= start < stop <= len(page_text) or page_text[start:stop] != content:
+                continue
+            if hashlib.sha256(page_text.encode("utf-8")).hexdigest() != item.get("page_digest"):
+                continue
             at = content.casefold().find(text.casefold())
             if at < 0:
                 at = next((content.casefold().find(t.casefold()) for t in _fallback_search_terms(text)
                            if t and content.casefold().find(t.casefold()) >= 0), 0)
             begin = max(0, at - 120)
             end = min(len(content), begin + 600)
+            # Avoid dangling English identifiers at excerpt boundaries, while
+            # retaining exact source offsets and bounded context expansion.
+            earliest = max(0, begin - 100)
+            while begin > earliest and re.fullmatch(r"[A-Za-z0-9_]", content[begin - 1]) and re.fullmatch(r"[A-Za-z0-9_]", content[begin]):
+                begin -= 1
+            latest = min(len(content), end + 100)
+            while end < latest and re.fullmatch(r"[A-Za-z0-9_]", content[end - 1]) and re.fullmatch(r"[A-Za-z0-9_]", content[end]):
+                end += 1
             item["char_start"] = int(item["char_start"]) + begin
             item["char_end"] = int(row["char_start"]) + end
             item["excerpt"] = content[begin:end]
+            item["content"] = item["excerpt"]
+            item["evidence_text"] = item["excerpt"]
+            item["source_hash_verified"] = True
+            item["evidence_type"] = "original_text"
+            item["evidence_key"] = f"raw:{source_key}:{item['page_number']}:{item['char_start']}:{item['char_end']}"
+            item["title"] = item.get("title") or item.get("original_name") or source_key[:12]
             item["locator"] = f"page:{item['page_number']}#chars={item['char_start']}-{item['char_end']}"
             result.append(item)
+            if len(result) >= limit:
+                break
         return result
 
     def get_source(self, source_id: str) -> Optional[Dict[str, Any]]:
@@ -406,7 +485,15 @@ class Database:
 
     @staticmethod
     def _job_dict(row: sqlite3.Row) -> Dict[str, Any]:
-        return dict(row)
+        result = dict(row)
+        for name in ("progress", "stage_timings"):
+            try:
+                value = json.loads(result.get(name) or "{}")
+                result[name] = value if isinstance(value, dict) else {}
+            except (ValueError, TypeError):
+                result[name] = {}
+        result["force_refresh"] = bool(result.get("force_refresh"))
+        return result
 
     def enqueue_ingest_job(
         self,
@@ -414,8 +501,17 @@ class Database:
         source_path: str,
         quality_mode: str = "basic",
         max_attempts: int = 3,
+        force_refresh: bool = False,
+        operation: str = "ingest",
+        focus: str = "",
     ) -> Dict[str, Any]:
         mode = quality_mode if quality_mode in {"basic", "standard", "high"} else "basic"
+        if operation not in {"ingest", "enrich", "supplement"}:
+            raise ValueError("operation must be ingest, enrich or supplement")
+        if focus not in {"", "method", "experiment", "overview"}:
+            raise ValueError("focus must be method, experiment or overview")
+        if operation == "supplement" and not focus:
+            raise ValueError("supplement operation requires focus")
         active = self.conn.execute(
             """SELECT * FROM ingest_jobs
                WHERE source_id=? AND status IN ('PENDING','RUNNING','PAUSED')
@@ -423,13 +519,16 @@ class Database:
             (source_id,),
         ).fetchone()
         if active:
+            existing = self._job_dict(active)
+            if (existing["quality_mode"], existing.get("operation") or "ingest", existing.get("focus") or "", existing["force_refresh"]) != (mode, operation, focus, bool(force_refresh)):
+                raise IngestJobConflict("This source already has a different active task; finish or cancel it before choosing another operation")
             return self._job_dict(active)
         cursor = self.conn.execute(
             """INSERT INTO ingest_jobs(
                    source_id,source_path,status,stage,quality_mode,attempts,max_attempts,
-                   error_message,created_at,updated_at
-               ) VALUES(?,?,'PENDING','QUEUED',?,0,?,'',datetime('now'),datetime('now'))""",
-            (source_id, source_path, mode, max(1, min(10, int(max_attempts)))),
+                   error_message,created_at,updated_at,force_refresh,operation,focus
+               ) VALUES(?,?,'PENDING','QUEUED',?,0,?,'',datetime('now'),datetime('now'),?,?,?)""",
+            (source_id, source_path, mode, max(1, min(10, int(max_attempts))), int(force_refresh), operation, focus),
         )
         self.conn.commit()
         row = self.conn.execute("SELECT * FROM ingest_jobs WHERE id=?", (cursor.lastrowid,)).fetchone()
@@ -455,7 +554,7 @@ class Database:
                 return None
             self.conn.execute(
                 """UPDATE ingest_jobs SET status='RUNNING',stage='STARTING',attempts=attempts+1,
-                   started_at=datetime('now'),finished_at=NULL,error_message='',updated_at=datetime('now')
+                   started_at=datetime('now'),finished_at=NULL,error_message='',progress='{}',stage_timings='{}',updated_at=datetime('now')
                    WHERE id=?""",
                 (int(row["id"]),),
             )
@@ -472,6 +571,8 @@ class Database:
         status: Optional[str] = None,
         stage: Optional[str] = None,
         error_message: Optional[str] = None,
+        progress: Optional[Dict[str, Any]] = None,
+        stage_timings: Optional[Dict[str, Any]] = None,
     ) -> None:
         fields = ["updated_at=datetime('now')"]
         params: List[Any] = []
@@ -486,6 +587,12 @@ class Database:
         if error_message is not None:
             fields.append("error_message=?")
             params.append(error_message[:2000])
+        if progress is not None:
+            fields.append("progress=?")
+            params.append(json.dumps(progress, ensure_ascii=False))
+        if stage_timings is not None:
+            fields.append("stage_timings=?")
+            params.append(json.dumps(stage_timings, ensure_ascii=False))
         params.append(job_id)
         self.conn.execute("UPDATE ingest_jobs SET " + ",".join(fields) + " WHERE id=?", params)
         self.conn.commit()
@@ -511,10 +618,16 @@ class Database:
             rows = self.conn.execute("SELECT * FROM ingest_jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._job_dict(row) for row in rows]
 
-    def retry_ingest_job(self, job_id: int, quality_mode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def retry_ingest_job(self, job_id: int, quality_mode: Optional[str] = None, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
         row = self.conn.execute("SELECT * FROM ingest_jobs WHERE id=?", (job_id,)).fetchone()
         if not row or str(row["status"]) not in {"FAILED", "CANCELLED", "PAUSED"}:
             return None
+        active = self.conn.execute(
+            "SELECT id FROM ingest_jobs WHERE source_id=? AND id<>? AND status IN ('PENDING','RUNNING','PAUSED') LIMIT 1",
+            (row["source_id"], job_id),
+        ).fetchone()
+        if active:
+            raise IngestJobConflict("This source already has an active task; it cannot be retried concurrently")
         attempts = int(row["attempts"] or 0)
         max_attempts = int(row["max_attempts"] or 3)
         if attempts >= max_attempts:
@@ -522,8 +635,8 @@ class Database:
         mode = quality_mode if quality_mode in {"basic", "standard", "high"} else str(row["quality_mode"] or "basic")
         self.conn.execute(
             """UPDATE ingest_jobs SET status='PENDING',stage='QUEUED',error_message='',
-               quality_mode=?,started_at=NULL,finished_at=NULL,updated_at=datetime('now') WHERE id=?""",
-            (mode, job_id),
+               quality_mode=?,force_refresh=?,started_at=NULL,finished_at=NULL,updated_at=datetime('now') WHERE id=?""",
+            (mode, int(force_refresh), job_id),
         )
         self.conn.commit()
         return self.get_ingest_job(job_id)
@@ -688,6 +801,7 @@ class Database:
         }
         return {
             "documents": sum(count for status, count in statuses.items() if status != "DELETED"),
+            "library_id": self.library_id,
             "statuses": statuses,
             "wiki_pages": int(self.conn.execute("SELECT count(*) FROM wiki_pages").fetchone()[0]),
             "links": int(self.conn.execute("SELECT count(*) FROM links").fetchone()[0]),
@@ -741,15 +855,22 @@ class Database:
         return value
 
     def get_page_sources(self, page_id: int) -> List[Dict[str, Any]]:
+        verified = [dict(row) for row in self.conn.execute(
+            """SELECT pe.*, 'compiled claim evidence' AS section,s.original_name,s.raw_path,s.sha256
+               FROM page_evidence pe JOIN sources s ON s.id=pe.source_id
+               WHERE pe.page_id=? AND pe.verification_status='supported'
+               AND s.deleted_at IS NULL
+               ORDER BY pe.source_id,pe.page_number,pe.char_start,pe.claim_id""", (page_id,))]
+        verified_ids = {value["source_id"] for value in verified}
         rows = self.conn.execute(
             """SELECT ps.source_id,ps.source_path,ps.locator,ps.page_number,
                       ps.section,ps.evidence_text,ps.char_start,ps.char_end,ps.paragraph,ps.confidence,
                       s.original_name,s.raw_path,s.sha256
                FROM page_sources ps LEFT JOIN sources s ON s.id=ps.source_id
-               WHERE ps.page_id=? ORDER BY s.original_name,ps.source_id""",
+               WHERE ps.page_id=? AND s.deleted_at IS NULL ORDER BY s.original_name,ps.source_id""",
             (page_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return verified + [dict(row) for row in rows if row["source_id"] not in verified_ids]
 
     def enrich_source_evidence(self, source_id: str, pages: Iterable[Any]) -> int:
         """Attach a reproducible page/character locator to every derived Wiki page.
@@ -818,7 +939,7 @@ class Database:
                      char_start=?,char_end=?,paragraph=?,confidence=? WHERE page_id=? AND source_id=?""",
                 (locator, page_number, section, evidence, paragraph_start, char_end,
                  len(re.findall(r"\n\s*\n", text[:paragraph_start])) + 1,
-                 "exact_text" if exact else "source_excerpt_fallback", int(row["id"]), source_id),
+                 "keyword_hit" if exact else "source_excerpt_fallback", int(row["id"]), source_id),
             )
             updated += 1
         self.conn.commit()
@@ -1025,8 +1146,19 @@ class Database:
             value["authors"] = []
         return value
 
-    def rebuild(self, wiki: WikiManager) -> Dict[str, int]:
+    def rebuild(self, wiki: WikiManager, excluded_paths: Optional[Sequence[Path]] = None) -> Dict[str, int]:
         pages = list(wiki.all_pages())
+        extra_excluded = {Path(value).resolve() for value in (excluded_paths or [])}
+        pages = [path for path in pages if path.resolve() not in extra_excluded]
+        manifest_path = wiki.root / "manifest.json"
+        if manifest_path.is_file():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if "excluded_wiki_paths" in manifest:
+                excluded = {(wiki.root / str(value)).resolve() for value in manifest["excluded_wiki_paths"]}
+            else:
+                workspace = wiki.root.parent.resolve()
+                excluded = {(workspace / str(value)).resolve() for value in manifest.get("excluded_paths", [])}
+            pages = [path for path in pages if path.resolve() not in excluded]
         existing = {row["path"]: row for row in self.conn.execute("SELECT * FROM wiki_pages")}
         source_rows = [dict(row) for row in self.conn.execute(
             """SELECT p.id,p.title,p.source_path,p.raw_path
@@ -1044,30 +1176,14 @@ class Database:
                     source_by_path[str(value)] = source_id
                     source_by_path[Path(str(value)).as_posix()] = source_id
         page_ids: Dict[str, int] = {}
-        reused_pages = 0
-        refreshed_pages = 0
+        changed_count = 0
         for path in pages:
             content = path.read_text(encoding="utf-8")
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             front = parse_frontmatter(content)
             page_type = str(front.get("type") or path.parent.name.rstrip("s"))
             title = str(front.get("title") or front.get("name") or path.stem.replace("-", " "))
             old = existing.get(str(path))
-            # Reindex only pages whose generated content actually changed.
-            # A stable compiled page retains its FTS, chunks and precise source
-            # locators. Link edges are still reconciled globally below.
-            if old and str(old["title"]) == title and str(old["type"]) == page_type:
-                cached = self.conn.execute(
-                    "SELECT content FROM chunks WHERE page_id=?", (int(old["id"]),)
-                ).fetchone()
-                has_provenance = self.conn.execute(
-                    "SELECT 1 FROM page_sources WHERE page_id=? LIMIT 1",
-                    (int(old["id"]),)
-                ).fetchone()
-                if cached and cached["content"] == content and has_provenance:
-                    page_ids[str(path)] = int(old["id"])
-                    reused_pages += 1
-                    continue
-            refreshed_pages += 1
             if old:
                 page_id = int(old["id"])
                 self.conn.execute("UPDATE wiki_pages SET title=?, type=?, updated_at=datetime('now') WHERE id=?", (title, page_type, page_id))
@@ -1075,8 +1191,14 @@ class Database:
                 cursor = self.conn.execute("INSERT INTO wiki_pages(title,type,path,created_at,updated_at) VALUES(?,?,?,datetime('now'),datetime('now'))", (title, page_type, str(path)))
                 page_id = int(cursor.lastrowid)
             page_ids[str(path)] = page_id
-            self.conn.execute("DELETE FROM chunks WHERE page_id=?", (page_id,))
-            self.conn.execute("INSERT INTO chunks(page_id,content,source) VALUES(?,?,?)", (page_id, content, str(path)))
+            changed = not old or old["content_hash"] != content_hash
+            if changed:
+                changed_count += 1
+                self.conn.execute("DELETE FROM chunks WHERE page_id=?", (page_id,))
+                self.conn.execute("INSERT INTO chunks(page_id,content,source) VALUES(?,?,?)", (page_id, content, str(path)))
+                self.conn.execute("DELETE FROM embeddings WHERE page_id=?", (page_id,))
+                self.conn.execute("UPDATE wiki_pages SET content_hash=? WHERE id=?", (content_hash, page_id))
+            self.conn.execute("DELETE FROM page_evidence WHERE page_id=?", (page_id,))
             self.conn.execute("DELETE FROM page_sources WHERE page_id=?", (page_id,))
             declared = front.get("sources") or front.get("source_hash") or []
             if isinstance(declared, str):
@@ -1111,7 +1233,8 @@ class Database:
                        VALUES(?,?,?,'',datetime('now'))""",
                     (page_id, source_id, source_paths.get(source_id, "")),
                 )
-            if self.fts_available:
+            fts_missing = self.fts_available and not self.conn.execute("SELECT 1 FROM wiki_fts WHERE page_id=?", (page_id,)).fetchone()
+            if self.fts_available and (changed or fts_missing):
                 self.conn.execute("DELETE FROM wiki_fts WHERE page_id=?", (page_id,))
                 self.conn.execute("INSERT INTO wiki_fts(title,type,path,content,page_id) VALUES(?,?,?,?,?)", (title, page_type, str(path), content, page_id))
         stale_paths = set(existing) - set(page_ids)
@@ -1119,6 +1242,7 @@ class Database:
             page_id = int(existing[stale]["id"])
             self.conn.execute("DELETE FROM chunks WHERE page_id=?", (page_id,))
             self.conn.execute("DELETE FROM page_sources WHERE page_id=?", (page_id,))
+            self.conn.execute("DELETE FROM page_evidence WHERE page_id=?", (page_id,))
             self.conn.execute("DELETE FROM embeddings WHERE page_id=?", (page_id,))
             self.conn.execute("DELETE FROM wiki_pages WHERE id=?", (page_id,))
             if self.fts_available:
@@ -1144,8 +1268,9 @@ class Database:
                    )"""
             )
         self.conn.commit()
-        return {"pages": len(pages), "links": link_count, "stale": len(stale_paths),
-                "reused": reused_pages, "refreshed": refreshed_pages}
+        return {"pages": len(pages), "links": link_count, "stale": len(stale_paths), "changed": changed_count,
+                "unchanged": len(pages) - changed_count, "refreshed": changed_count,
+                "reused": len(pages) - changed_count}
 
     def search(self, query: str, top_k: int = 8) -> List[Dict[str, Any]]:
         fetch_limit = max(top_k * 4, 16)

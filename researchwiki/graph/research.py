@@ -7,26 +7,54 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..index.database import Database
 from ..wiki.manager import normalize_name, parse_frontmatter
+from ..wiki.entities import canonical_entity
+from ..qa.retrieval import _validated_span
+from types import SimpleNamespace
 
 LABELS = {
     "STUDIES_TOPIC": "研究主题",
     "REFERENCES_METHOD": "关联方法",
     "MENTIONS_DATASET": "提及数据集",
-    "TESTED_ON": "测试关联（待核对）",
-    "TRAINED_ON": "训练关联（待核对）",
-    "VALIDATED_ON": "验证关联（待核对）",
+    "TESTED_ON": "已核验测试用途",
+    "TRAINED_ON": "已核验训练用途",
+    "VALIDATED_ON": "已核验验证用途",
     "RELATED": "相关研究",
 }
 
 
 def _id(path: str) -> str:
     return "research:" + hashlib.sha256(path.encode()).hexdigest()[:20]
+
+
+def _dataset_role(quote: str, name: str) -> str:
+    """A dataset and its experimental predicate must occur in the same clause."""
+    term = re.escape(name)
+    for relation, verb in (("TRAINED_ON", r"train(?:ed|ing|s)?"),
+                           ("TESTED_ON", r"(?:test(?:ed|ing|s)?|evaluat(?:e|ed|es|ion))"),
+                           ("VALIDATED_ON", r"validat(?:e|ed|es|ion)")):
+        patterns = (
+            r"\b" + verb + r"\b[^.;\n]{0,55}?\b(?:on|using|with)\s+(?:the\s+)?" + term + r"(?!\w)",
+            r"(?<!\w)" + term + r"\s+(?:is|was|were|are)\s+used\s+(?:for|in)\s+" + verb + r"\b",
+            r"\b(?:uses?|used)\s+(?:the\s+)?" + term + r"\s+(?:for|in)\s+" + verb + r"\b",
+        )
+        if any(re.search(pattern, quote, re.I) for pattern in patterns):
+            # Do not cross another explicit role's clause to bind this target.
+            for match in (re.search(pattern, quote, re.I) for pattern in patterns):
+                if match and not re.search(r"\band\s+(?:train|test|evaluat|validat)", match.group(), re.I):
+                    return relation
+    for relation, verb in (("TRAINED_ON", "训练"), ("TESTED_ON", "测试|评测|评估"), ("VALIDATED_ON", "验证")):
+        if re.search(r"(?:在|使用|采用)\s*" + term + r"[^，。；\n]{0,12}(?:" + verb + ")", quote):
+            return relation
+        if re.search(term + r"\s*(?:数据集)?\s*(?:用于|用作)(?:" + verb + ")", quote):
+            return relation
+    return ""
 
 
 def project_research_graph(
@@ -63,7 +91,13 @@ def project_research_graph(
     ).fetchall()
     edges = []
     seen = set()
-    extraction_by_source: Dict[str, Dict[str, Any]] = {}
+    try:
+        manifest = json.loads((workspace / "wiki" / "manifest.json").read_text(encoding="utf-8"))
+        claims_by_source = {str(source_id): page.get("claims", []) for page in manifest.get("pages", [])
+                            if page.get("type") == "paper" for source_id in page.get("sources", [])}
+    except (OSError, ValueError, TypeError):
+        claims_by_source = {}
+    validated_documents: Dict[str, Any] = {}
     for link in raw_edges:
         sid, tid = int(link["source_id"]), int(link["target_id"])
         if sid not in node_ids or tid not in node_ids or sid == tid:
@@ -74,30 +108,29 @@ def project_research_graph(
             continue
         relation = {"topic": "STUDIES_TOPIC", "method": "REFERENCES_METHOD",
                     "dataset": "MENTIONS_DATASET"}[target["type"]]
+        support = {}
         if target["type"] == "dataset":
             source_hash = str(metadata[sid].get("source_hash") or "")
-            if source_hash and source_hash not in extraction_by_source:
-                file = workspace / "data" / "extractions" / (source_hash + ".json")
-                try:
-                    extraction_by_source[source_hash] = json.loads(file.read_text(encoding="utf-8"))
-                except (OSError, ValueError, TypeError):
-                    extraction_by_source[source_hash] = {}
-            values = extraction_by_source.get(source_hash, {}).get("datasets") or []
-            for value in values:
-                if not isinstance(value, dict) or normalize_name(str(value.get("name") or "")) != normalize_name(target["title"]):
+            for claim in claims_by_source.get(source_hash, []):
+                if not isinstance(claim, dict) or (claim.get("verification") or {}).get("status") != "supported":
                     continue
-                status = value.get("usage_status") or "mentioned"
-                # Only exact quote matches may support an experimental role.
-                locators = extraction_by_source.get(source_hash, {}).get("field_evidence") or []
-                has_quote = any(
-                    row.get("status") == "quote_matched" and
-                    str(row.get("field") or "").startswith("datasets:")
-                    for row in locators if isinstance(row, dict)
-                )
-                if has_quote:
-                    relation = {"training": "TRAINED_ON", "testing": "TESTED_ON",
-                                "validation": "VALIDATED_ON"}.get(status, relation)
-                break
+                entities = [entry for entry in claim.get("entities", []) if isinstance(entry, dict)
+                            and entry.get("type") == "dataset" and entry.get("name")
+                            and canonical_entity("dataset", entry["name"])["canonical_id"] == canonical_entity("dataset", target["title"])["canonical_id"]]
+                if not entities:
+                    continue
+                span = _validated_span(SimpleNamespace(root=workspace), database,
+                        {**(claim.get("evidence") or {}), "source_id": source_hash}, validated_documents)
+                if not span:
+                    continue
+                role = _dataset_role(span["evidence_text"], str(target["title"]))
+                if role:
+                    relation = role
+                    support = {"claim_id": claim["claim_id"], "source_id": source_hash,
+                               "verification_status": "supported", "locator": span["locator"],
+                               "page_number": span["page_number"], "char_start": span["char_start"],
+                               "char_end": span["char_end"], "evidence": span["evidence_text"]}
+                    break
         edge_id = (node_ids[sid], node_ids[tid], relation)
         if edge_id in seen:
             continue
@@ -106,6 +139,7 @@ def project_research_graph(
             "id": "edge:" + hashlib.sha256("|".join(edge_id).encode()).hexdigest()[:18],
             "source": node_ids[sid], "target": node_ids[tid],
             "semantic": relation, "label": LABELS[relation],
+            **support,
         })
         degree[node_ids[sid]] += 1
         degree[node_ids[tid]] += 1

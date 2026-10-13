@@ -124,4 +124,7 @@ def test_opt_in_cross_paper_summary_is_cited_and_cached(tmp_path):
                       if page["type"] == "topic" and page["title"] == "Retrieval Robustness")
     text = (tmp_path / topic_page["path"]).read_text()
     assert "## 深度跨论文综合（待人工复核）" in text
-    assert "Both papers investigate retrieval robustness. [1] [2]" in text
+    assert "Both papers investigate retrieval robustness." in text
+    assert all(source_id in text for source_id in summary["source_ids"])
+    from researchwiki.qa.retrieval import factual_text
+    assert "Both papers investigate retrieval robustness." not in factual_text(text)

@@ -6,18 +6,15 @@ dist/
 build/
 *.egg-info/
 
-# ResearchWiki runtime data (keep the Markdown wiki and raw sources under version control if desired)
-data/*.db
-data/*.db-*
-data/inbox/
-data/backups/
-data/acceptance/
-data/compilation/
-data/evaluation/
-logs/*.log
+# Private runtime libraries, generated knowledge, model checkpoints and logs.
+# Includes data/private/, data/syntheses/ and all future runtime subdirectories.
+data/
+raw/
+wiki/
+logs/
 
-# Local secrets
+# Local credentials; publish only the empty configuration example.
 .env
-
-# Private user-entered model credentials
-data/private/
+.env.*
+!.env.example
+.DS_Store

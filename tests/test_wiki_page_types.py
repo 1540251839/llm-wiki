@@ -21,7 +21,7 @@ def test_wiki_page_types_have_distinct_content(tmp_path):
         experiment_info="DemoSet contains 100 queries.",
         source_hash=digest, source_path=str(raw),
         methods=[EntityMention("Named Approach", "A retrieval algorithm.", "Legal retrieval", "Applies evidence weighting.")],
-        datasets=[EntityMention("DemoSet", "Retrieval benchmark.", "Legal retrieval", "100 queries.")],
+        datasets=[EntityMention("DemoSet", "Retrieval benchmark.", "Legal retrieval", statistics="100 queries.")],
         topics=["Legal retrieval"], findings=["Improved score by 10%."],
     )
     (tmp_path / "data" / "extractions").mkdir(parents=True, exist_ok=True)

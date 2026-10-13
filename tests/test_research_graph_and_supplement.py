@@ -23,6 +23,9 @@ class FakeModel:
                 "datasets": [{"name": "LeCaRD", "usage_status": "testing", "role": "用于测试"}],
                 "evidence": [{"field": "datasets:LeCaRD",
                               "quote": "We evaluate the method on LeCaRD for case retrieval."}],
+                "claims": [{"statement": "We evaluate the method on LeCaRD for case retrieval.",
+                            "claim_type": "experiment_result", "entities": [{"type": "dataset", "name": "LeCaRD"}],
+                            "evidence": {"quote": "We evaluate the method on LeCaRD for case retrieval."}}],
             }
         return {
             "title": "An Evidence Based Study",
@@ -30,6 +33,9 @@ class FakeModel:
             "datasets": [{"name": "LeCaRD", "role": "文中提及"}],
             "topics": ["Legal case retrieval"],
             "research_problem": "如何在噪声下可靠地检索类案？",
+            "claims": [{"statement": "We propose Evidence Selector as a robust solution.",
+                        "claim_type": "method", "entities": [{"type": "method", "name": "Evidence Selector"}],
+                        "evidence": {"quote": "We propose Evidence Selector as a robust solution."}}],
         }
 
 

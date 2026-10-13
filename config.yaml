@@ -7,7 +7,6 @@ llm:
 
 wiki:
   root: ./wiki
-  language: zh-CN  # 中文解释优先；英文标题、摘要及证据始终保留
 
 database:
   path: ./data/researchwiki.db
@@ -31,4 +30,3 @@ ingestion:
 
 parser:
   backend: pymupdf
-  grobid_url: ""  # 可选本地 GROBID: http://127.0.0.1:8070

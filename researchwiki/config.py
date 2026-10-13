@@ -15,6 +15,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "base_url": "https://api.deepseek.com",
         "timeout_seconds": 180,
         "max_retries": 1,
+        "max_output_tokens": 8192,
+        "json_max_retries": 1,
     },
     "wiki": {"root": "./wiki", "language": "zh-CN"},
     "database": {"path": "./data/researchwiki.db"},
@@ -35,6 +37,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "ingestion": {
         "quality_mode": "basic",
         "max_attempts": 3,
+        "max_chunk_chars": 12000,
+        "min_chunk_chars": 2000,
+        "max_split_depth": 2,
     },
     "parser": {"backend": "pymupdf", "grobid_url": ""},
 }

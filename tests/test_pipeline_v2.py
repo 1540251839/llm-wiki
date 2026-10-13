@@ -34,6 +34,10 @@ class PipelineLLM:
             "topics": ["Traceability"],
             "findings": ["Provenance improves auditability."],
             "limitations": [],
+            "claims": [{"statement": "Shared Method links traceable evidence to Shared Dataset.",
+                        "claim_type": "method", "entities": [{"type": "method", "name": "Shared Method"},
+                                                                  {"type": "dataset", "name": "Shared Dataset"}],
+                        "evidence": {"quote": "Shared Method links traceable evidence to Shared Dataset."}}],
         }
 
 
@@ -44,8 +48,8 @@ class ResearchWikiPipelineV2Test(unittest.TestCase):
             config = load_config(root)
             first = root / "first.txt"
             second = root / "second.txt"
-            first.write_text("FIRST_UNIQUE_MARKER traceable evidence", encoding="utf-8")
-            second.write_text("SECOND_UNIQUE_MARKER traceable evidence", encoding="utf-8")
+            first.write_text("FIRST_UNIQUE_MARKER\nShared Method links traceable evidence to Shared Dataset.", encoding="utf-8")
+            second.write_text("SECOND_UNIQUE_MARKER\nShared Method links traceable evidence to Shared Dataset.", encoding="utf-8")
 
             first_result = ingest(config, first, llm_client=PipelineLLM())
             second_result = ingest(config, second, llm_client=PipelineLLM())

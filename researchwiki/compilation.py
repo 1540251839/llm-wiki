@@ -22,17 +22,20 @@ import yaml
 
 from .config import Config
 from .extraction.synthesis import load_topic_synthesis
+from .extraction.quality import QualityGateError, assess_paper
 from .index.database import Database
 from .models import ParsedDocument, StructuredPaper
 from .parsing.pdf import parse_file
+from .wiki.entities import ENTITY_TYPES, EntityRegistry
 from .wiki.manager import (
     NOTE_END, NOTE_START, WikiManager, normalize_name, parse_frontmatter, slugify,
     wiki_links,
 )
 
 
-COMPILER = "researchwiki.compiler.v1"
-SCHEMA_VERSION = 1
+COMPILER = "researchwiki.compiler.v2"
+LEGACY_COMPILER = "researchwiki.compiler.v1"
+SCHEMA_VERSION = 2
 
 
 def _json(value: Any) -> str:
@@ -63,6 +66,7 @@ class _Source:
     raw_path: str
     document: ParsedDocument
     extraction_hash: str
+    claims: Dict[str, Any]
 
 
 class CompilationService:
@@ -72,6 +76,7 @@ class CompilationService:
         self.wiki = WikiManager(config.wiki_root)
         self.state_dir = config.root / "data" / "compilation"
         self.manifest_path = config.wiki_root / "manifest.json"
+        self.entities = EntityRegistry()
 
     def _relative(self, path: Path) -> str:
         try:
@@ -136,14 +141,49 @@ class CompilationService:
                 if str(payload.get("source_hash") or "") != source_id:
                     raise ValueError("结构化抽取缓存与来源哈希不匹配。")
                 paper = StructuredPaper.from_dict(payload)
+                quality = assess_paper(paper)
+                if not quality["allowed"] and paper.extraction_mode != "basic":
+                    item.update(reason="结构化缓存未通过质量门禁，已隔离其历史生成页面。", isolated=True, quality=quality)
+                    diagnostics.append({"severity": "warning", "code": "source_quality", "source_id": source_id,
+                                        "message": item["reason"], "issues": quality.get("issues", [])})
+                    continue
+                item["quality"] = quality
+                for issue in quality.get("issues", []):
+                    if issue.get("severity") == "warning":
+                        diagnostics.append({"severity": "warning", "code": "source_quality_warning", "source_id": source_id,
+                                            "message": issue.get("message", "结构化缓存尚不完整。"), "quality_code": issue.get("code")})
                 document = parse_file(raw)
-                if not any(page.text.strip() for page in document.pages):
+                if not any(page.text.strip() for page in document.pages) and paper.extraction_mode != "basic":
                     raise ValueError("原始资料没有可定位的文本，请先处理 OCR。")
                 # Absolute input paths are runtime details, not content identity.
                 stable_payload = dict(payload)
                 stable_payload.pop("source_path", None)
-                sources.append(_Source(source_id, paper, raw, item["raw_path"], document, _digest(stable_payload)))
-                item.update(title=paper.title, ready=True, evidence_pages=len(document.pages), reason="缓存与原件哈希验证通过")
+                claims_path = self.config.root / "data" / "claims" / (source_id + ".json")
+                existing = None
+                if claims_path.is_file():
+                    try:
+                        existing = json.loads(claims_path.read_text(encoding="utf-8"))
+                        if not isinstance(existing, dict) or not isinstance(existing.get("claims", []), list):
+                            raise ValueError("无效 Claim bundle")
+                    except (OSError, ValueError):
+                        diagnostics.append({"severity": "warning", "code": "claims_cache_invalid", "source_id": source_id,
+                                            "message": "Claim 缓存无法读取，已从抽取记录重新核验。"})
+                # Cached status is not trust: verify again against the immutable
+                # source, with human decisions bound by the verifier to digests.
+                from .verification import verify_paper
+                bundle = verify_paper(paper, document, source_id, existing=existing)
+                if paper.extraction_mode == "basic":
+                    bundle["claims"] = []
+                source = _Source(source_id, paper, raw, item["raw_path"], document, _digest(stable_payload), bundle)
+                supported = self._verified_claims(source, diagnostics)
+                item.update(title=paper.title, ready=True, evidence_pages=len(document.pages),
+                            supported_claims=len(supported), pending_claims=len(bundle.get("claims", [])) - len(supported),
+                            reason="缓存与原件哈希验证通过；具体事实仅使用已核验 Claim。")
+                sources.append(source)
+            except QualityGateError as exc:
+                item.update(reason=str(exc), isolated=True, quality=exc.quality)
+                diagnostics.append({"severity": "warning", "code": "source_quality", "source_id": source_id,
+                                    "message": str(exc), "issues": exc.issues})
             except (OSError, ValueError, TypeError, RuntimeError) as exc:
                 item["reason"] = str(exc)
                 diagnostics.append({"severity": "error", "code": "source_integrity", "source_id": source_id, "message": str(exc)})
@@ -160,7 +200,7 @@ class CompilationService:
             for page in source.document.pages:
                 match = pattern.search(page.text)
                 if match:
-                    selected = (page, max(0, match.start() - 100), "exact_text")
+                    selected = (page, max(0, match.start() - 100), "keyword_hit")
                     break
             if selected:
                 break
@@ -182,22 +222,72 @@ class CompilationService:
         }
 
     @staticmethod
-    def _specs(sources: List[_Source]) -> List[Dict[str, Any]]:
+    def _verified_claims(source: _Source, diagnostics: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+        """Require both the verifier's decision and the exact current raw span."""
+        if source.paper.extraction_mode == "basic":
+            return []
+        result = []
+        for claim in source.claims.get("claims", []):
+            if not isinstance(claim, dict):
+                continue
+            verification = claim.get("verification") or {}
+            evidence = claim.get("evidence") or {}
+            quote = str(evidence.get("quote") or "")
+            valid = (verification.get("status") == "supported" and bool(str(claim.get("claim_id") or "").strip())
+                     and bool(str(claim.get("statement") or "").strip()))
+            try:
+                page = next(page for page in source.document.pages if page.number == int(evidence.get("page_number")))
+                start, end = int(evidence.get("char_start")), int(evidence.get("char_end"))
+                valid = valid and evidence.get("source_id") == source.source_id and bool(quote.strip())
+                valid = valid and 0 <= start < end <= len(page.text) and page.text[start:end] == quote
+            except (StopIteration, TypeError, ValueError):
+                valid = False
+            if valid:
+                result.append(claim)
+            elif diagnostics is not None:
+                diagnostics.append({"severity": "warning", "code": "claim_quarantined", "source_id": source.source_id,
+                                    "claim_id": claim.get("claim_id"), "verification_status": verification.get("status", "pending_review"),
+                                    "message": str(verification.get("reason") or "该 Claim 未获原文精确证据支持，已从正文与实体页面隔离。")})
+        return sorted(result, key=lambda claim: str(claim.get("claim_id") or ""))
+
+    def _specs(self, sources: List[_Source]) -> List[Dict[str, Any]]:
         specs: Dict[str, Dict[str, Any]] = {}
         for source in sources:
             paper = source.paper
+            claims = self._verified_claims(source)
             paper_id = "paper:" + source.source_id
-            specs[paper_id] = {"id": paper_id, "type": "paper", "title": paper.title, "contributors": [(source, "", "")]}
-            for kind, values in (("method", paper.methods), ("dataset", paper.datasets), ("topic", paper.topics)):
-                for entity in values:
-                    title = entity if isinstance(entity, str) else entity.name
-                    if not title.strip():
+            specs[paper_id] = {"id": paper_id, "type": "paper", "title": paper.title,
+                               "contributors": [(source, "", "")], "claims": [(source, claim) for claim in claims]}
+            # Entity indexes are navigation, not factual approval. Their model
+            # descriptions live only in explicitly unverified reading sections.
+            if paper.extraction_mode != "basic":
+                for kind, values in (("method", paper.methods), ("dataset", paper.datasets), ("topic", paper.topics)):
+                    for original in values:
+                        name = original if isinstance(original, str) else original.name
+                        if not str(name).strip():
+                            continue
+                        entity = self.entities.resolve(kind, name)
+                        spec = specs.setdefault(entity["canonical_id"], {"id": entity["canonical_id"], "type": kind,
+                            "title": entity["name"], "aliases": entity["aliases"], "contributors": [], "claims": []})
+                        if not any(entry[0].source_id == source.source_id for entry in spec["contributors"]):
+                            spec["contributors"].append((source, getattr(original, "description", ""), getattr(original, "role", "")))
+            for claim in claims:
+                for mention in claim.get("entities") or []:
+                    if not isinstance(mention, dict):
                         continue
-                    page_id = kind + ":" + hashlib.sha256(normalize_name(title).encode("utf-8")).hexdigest()[:16]
-                    spec = specs.setdefault(page_id, {"id": page_id, "type": kind, "title": title, "contributors": []})
-                    if any(item[0].source_id == source.source_id for item in spec["contributors"]):
+                    kind, name = str(mention.get("type") or ""), str(mention.get("name") or "").strip()
+                    if kind not in ENTITY_TYPES or not name:
                         continue
-                    spec["contributors"].append((source, "" if isinstance(entity, str) else entity.description, "" if isinstance(entity, str) else entity.role))
+                    entity = self.entities.resolve(kind, name)
+                    page_id = entity["canonical_id"]
+                    spec = specs.setdefault(page_id, {"id": page_id, "type": kind, "title": entity["name"],
+                                                      "aliases": entity["aliases"], "contributors": [], "claims": []})
+                    if not any(item[0].source_id == source.source_id and item[1].get("claim_id") == claim.get("claim_id") for item in spec["claims"]):
+                        spec["claims"].append((source, claim))
+                    if not any(item[0].source_id == source.source_id for item in spec["contributors"]):
+                        values = {"method": paper.methods, "dataset": paper.datasets, "topic": paper.topics}[kind]
+                        original = next((value for value in values if EntityRegistry().resolve(kind, value if isinstance(value, str) else value.name)["canonical_id"] == page_id), None)
+                        spec["contributors"].append((source, getattr(original, "description", ""), getattr(original, "role", "")))
         return sorted(specs.values(), key=lambda item: item["id"])
 
     def _legacy_matches(self, path: Path, spec: Dict[str, Any]) -> bool:
@@ -249,7 +339,7 @@ class CompilationService:
             if path.exists():
                 current = path.read_text(encoding="utf-8")
                 front = parse_frontmatter(current)
-                trusted = front.get("generated_by") == COMPILER and front.get("id") == spec["id"]
+                trusted = front.get("generated_by") in {COMPILER, LEGACY_COMPILER} and front.get("id") == spec["id"]
                 if trusted and old.get("generated_sha256"):
                     trusted = _digest(self.wiki._generated_part(current)) == old["generated_sha256"]
                 if not trusted and not self._legacy_matches(path, spec):
@@ -266,212 +356,151 @@ class CompilationService:
                     and old.get("generated_sha256")
                     and _digest(self.wiki._generated_part(current)) != old["generated_sha256"]
                 )
-                if front.get("generated_by") != COMPILER or front.get("id") != spec["id"] or changed_generated:
+                if front.get("generated_by") not in {COMPILER, LEGACY_COMPILER} or front.get("id") != spec["id"] or changed_generated:
                     diagnostics.append({"severity": "error", "code": "path_conflict", "path": self._relative(path), "message": "稳定生成路径已被人工文件占用，请先人工整理该冲突。"})
             spec["path"] = path
             reserved.add(path)
 
     def _display_title(self, spec: Dict[str, Any]) -> str:
-        """Chinese display alias, original stable entity name remains unchanged."""
         name = spec["title"]
         if self.config.wiki_language != "zh-CN" or spec["type"] == "paper":
             return name
-        aliases: List[str] = []
-        for source, _description, _role in spec["contributors"]:
+        labels = []
+        for source, _, _ in spec["contributors"]:
             paper = source.paper
             if spec["type"] == "topic":
-                aliases.extend(
-                    str(alias).strip() for original, alias in paper.topic_labels_zh.items()
-                    if normalize_name(original) == normalize_name(name) and str(alias).strip()
-                )
-            elif spec["type"] in {"method", "dataset"}:
-                entities = paper.methods if spec["type"] == "method" else paper.datasets
-                aliases.extend(
-                    item.name_zh.strip() for item in entities
-                    if normalize_name(item.name) == normalize_name(name) and item.name_zh.strip()
-                )
-        # A translated label is for reading only; it must never alter IDs or links.
-        aliases = [alias for alias in aliases if re.search(r"[\u3400-\u9fff]", alias)]
-        if not aliases:
+                labels.extend(str(label).strip() for original, label in paper.topic_labels_zh.items()
+                              if self.entities.resolve("topic", original)["canonical_id"] == spec["id"])
+            else:
+                values = paper.methods if spec["type"] == "method" else paper.datasets
+                labels.extend(item.name_zh.strip() for item in values
+                              if self.entities.resolve(spec["type"], item.name)["canonical_id"] == spec["id"])
+        labels = [label for label in labels if re.search(r"[\u3400-\u9fff]", label)]
+        if not labels:
             return name
-        counts = Counter(aliases)
-        preferred = sorted(counts, key=lambda item: (-counts[item], item))[0]
-        if normalize_name(preferred) == normalize_name(name):
-            return name
-        return f"{preferred}（{name}）"
+        counts = Counter(labels)
+        preferred = sorted(counts, key=lambda label: (-counts[label], label))[0]
+        return name if normalize_name(preferred) == normalize_name(name) else f"{preferred}（{name}）"
 
     def _render(self, spec: Dict[str, Any], title_by_id: Dict[str, str]) -> Tuple[str, List[Dict[str, Any]]]:
         contributors = spec["contributors"]
         evidence = []
-        for source, description, _role in contributors:
-            terms = [spec["title"], description]
-            evidence.append(self._evidence(source, terms))
+        claims = spec["claims"]
+        for source, claim in claims:
+            span = claim["evidence"]
+            start, end = int(span["char_start"]), int(span["char_end"])
+            evidence.append({"claim_id": claim["claim_id"], "source_id": source.source_id,
+                             "source_path": source.raw_path, "page_number": int(span["page_number"]),
+                             "paragraph": span.get("paragraph"), "char_start": start, "char_end": end,
+                             "locator": f"page:{int(span['page_number'])}#chars={start}-{end}",
+                             "evidence_text": span["quote"], "quote": span["quote"],
+                             "confidence": "verified_quote", "verification_status": "supported"})
         source_ids = [source.source_id for source, _, _ in contributors]
-        display_title = self._display_title(spec)
-        front = {"id": spec["id"], "type": spec["type"], "title": spec["title"], "display_title": display_title,
-                 "sources": source_ids, "generated_by": COMPILER, "schema_version": SCHEMA_VERSION}
+        front = {"id": spec["id"], "type": spec["type"], "title": spec["title"], "display_title": self._display_title(spec), "sources": source_ids,
+                 "generated_by": COMPILER, "schema_version": SCHEMA_VERSION,
+                 "claim_ids": [claim["claim_id"] for _, claim in claims],
+                 "verification_status": "supported" if claims else "no_supported_claims"}
+        if spec.get("aliases"):
+            front.update(canonical_id=spec["id"], aliases=spec["aliases"])
+        # Source text must remain text, not compiler section delimiters/links.
+        def literal(value: Any) -> str:
+            return str(value).replace("<!--", "&lt;!--").replace("[[", "&#91;&#91;").replace("]]", "&#93;&#93;")
+
         if spec["type"] == "paper":
             source = contributors[0][0]
             paper = source.paper
             front.update(source=source.raw_path, source_hash=source.source_id, authors=paper.authors, year=paper.year)
-            lines = [
-                f"# {paper.title}", "", "## 基本信息", "",
-                f"作者：{', '.join(paper.authors) or '未提供'}",
-                f"年份：{paper.year or '未提供'}", "",
-            ]
-            # A paper is a research explanation, not merely a bibliography entry.
-            lines.extend(["## 阅读导览", ""])
-            if paper.research_problem.strip():
-                lines.extend(["### 研究什么", "", paper.research_problem.strip(), ""])
-            if paper.methodology.strip():
-                lines.extend(["### 怎么做", "", paper.methodology.strip(), ""])
-            if paper.findings:
-                lines.extend(["### 得到什么结果", "",
-                              *["- " + finding for finding in paper.findings[:5]], ""])
-            if not (paper.research_problem or paper.methodology or paper.findings):
-                lines.extend(["当前为基础论文资料卡，尚未进行方法和结果的深度解读；可在资料详情中主动选择深度分析。", ""])
+            lines = [f"# {literal(paper.title)}", "", "## 基本信息", "",
+                     "以下为抽取记录中的书目信息，不作为研究结论的验证依据。", "",
+                     f"作者：{literal(', '.join(paper.authors)) or '未提供'}", f"年份：{paper.year or '未提供'}", "",
+                     "## 已核验事实", ""]
+            if not claims:
+                lines.extend(["尚无得到原文支持的 Claim；摘要、方法概述和实验结论未进入知识正文。", ""])
+            headings = {"abstract": "摘要", "research_problem": "研究问题", "methodology": "核心方法",
+                        "method": "方法", "dataset": "数据集", "topic": "研究主题", "contribution": "主要贡献",
+                        "contributions": "主要贡献", "metric": "评价指标", "metrics": "评价指标",
+                        "finding": "实验结论", "findings": "实验结论", "result": "实验结论",
+                        "limitation": "局限性", "limitations": "局限性"}
+            for index, (_source, claim) in enumerate(claims, 1):
+                lines.extend([f"### {headings.get(str(claim.get('claim_type') or ''), '事实')} · {literal(claim['claim_id'])}", "",
+                              literal(claim["statement"]) + f" [{index}]", ""])
+            pending_count = len(source.claims.get("claims", [])) - len(claims)
+            lines.extend(["## 待核验记录", "", f"{pending_count} 条 Claim 尚未获得支持，保存在审核记录中；未将其作为事实显示。", ""])
+            lines.extend(["<!-- pending-reading:start -->", "## 阅读导览（待核验解读）", "",
+                          "本区为模型解读或离线原文展示，不作为已支持事实、图谱实验关系或问答知识证据。", ""])
+            if paper.extraction_mode == "basic":
+                lines.extend(["当前为基础论文资料卡；尚未进行方法和结果的深度解读。", ""])
             if self.config.wiki_language == "zh-CN":
-                lines.extend(["## 中文摘要", "",
-                    (paper.abstract_zh.strip() + "\n\n*中文内容由模型生成，需对照原文核实。*")
-                    if paper.abstract_zh.strip()
-                    else "暂无中文摘要。基础模式不调用翻译模型；可查看下面的原文。", ""])
-            lines.extend([
-                "## 原文摘要（Abstract）", "",
-                (paper.abstract.strip() + " [1]") if paper.abstract else "原文未提取到摘要。",
-                "", "## 关键词（原文）", "",
-                *(["- " + keyword for keyword in paper.keywords] or ["- 原文未提取到作者关键词。"]),
-            ])
-            for heading, kind, values in (
-                ("数据集", "dataset", paper.datasets),
-                ("相关方法", "method", paper.methods),
-                ("相关研究主题", "topic", paper.topics),
-            ):
-                names = [value if isinstance(value, str) else value.name for value in values]
-                names = [title_by_id.get(
-                    kind + ":" + hashlib.sha256(normalize_name(name).encode("utf-8")).hexdigest()[:16],
-                    name,
-                ) for name in names if name.strip()]
-                lines.extend(["", "## " + heading, "",
-                              *(['- [[' + name + ']]' for name in dict.fromkeys(names)] or ["- 未识别。"])])
-            lines.extend(["", "## 实验信息", "",
-                          paper.experiment_info.strip() if paper.experiment_info.strip()
-                          else "未提取到可供解释的实验信息。"])
-            if paper.metrics:
-                lines.extend(["", "### 评价指标", "",
-                              *["- " + item for item in paper.metrics]])
-            if paper.limitations:
-                lines.extend(["", "## 作者声明的局限性", "",
-                              *["- " + item for item in paper.limitations]])
-            # Only exact source quote matches are evidence locators, not proof of
-            # semantic entailment; never upgrade page-level fallback evidence.
-            matched = [row for row in paper.field_evidence if row.get("status") == "quote_matched"]
-            lines.extend(["", "## 字段级出处", ""])
-            if matched:
-                lines.append("以下原文位置已与 PDF 文本匹配；是否支持对应解释仍需核查。")
-                for row in matched[:40]:
-                    original_quote = str(row.get("quote") or "").replace("\n", " ").strip()
-                    lines.extend(["", "- " + str(row.get("field")) +
-                                  f"：第 {row.get('page')} 页 · `{row.get('locator')}`",
-                                  "  - 原文：" + original_quote])
-            else:
-                lines.append("尚未建立逐字段原文支持关系。摘要、实验和结论不应被当成已经核验的事实。")
-            lines.extend(["", "## 原文来源", "",
-                          "原始文件：`" + source.raw_path + "`",
-                          "SHA-256：`" + source.source_id + "`", ""])
+                lines.extend(["## 中文摘要", "", literal(paper.abstract_zh) if paper.abstract_zh else
+                              "暂无中文摘要。基础模式不调用翻译模型；可查看原文。", ""])
+            lines.extend(["## 原文摘要（Abstract）", "", literal(paper.abstract) or "原文未提取到摘要。", "",
+                          "## 关键词（原文）", "", *["- " + literal(word) for word in paper.keywords], ""])
+            if paper.extraction_mode != "basic":
+                for heading, text in (("研究什么", paper.research_problem), ("怎么做", paper.methodology),
+                                      ("实验信息", paper.experiment_info)):
+                    lines.extend(["## " + heading, "", literal(text) or "尚未提取。", ""])
+                for heading, values in (("模型提取的结果", paper.findings), ("模型提取的局限性", paper.limitations),
+                                        ("模型提取的评价指标", paper.metrics)):
+                    lines.extend(["## " + heading, "", *["- " + literal(value) for value in values], ""])
+            lines.extend(["<!-- pending-reading:end -->", ""])
+            related: Dict[str, List[str]] = defaultdict(list)
+            for _, claim in claims:
+                for mention in claim.get("entities") or []:
+                    if not isinstance(mention, dict) or mention.get("type") not in ENTITY_TYPES or not str(mention.get("name") or "").strip():
+                        continue
+                    entity = self.entities.resolve(mention["type"], mention["name"])
+                    related[entity["type"]].append(title_by_id[entity["canonical_id"]])
+            for kind, heading in (("method", "方法"), ("dataset", "数据集"), ("topic", "相关研究主题")):
+                lines.extend(["## " + heading, "", *(["- [[" + name + "]]" for name in dict.fromkeys(related[kind])] or ["- 暂无已核验关联。"]), ""])
         else:
-            kind = spec["type"]
-            lines = ["# " + display_title, ""]
-            if kind == "topic":
-                lines.extend(["## 概念简介", "",
-                              f"这是一个研究主题索引，当前关联 {len(contributors)} 篇论文。"
-                              "尚无独立来源支持的统一定义时，不自动编造概念解释。", "",
-                              "## 研究方向分类", "",
-                              "下列论文关注不同具体研究问题；当前不将相似关键词直接当成成熟子方向。", "",
-                              "## 论文关注的问题", ""])
-                found_any = False
-                for index, (source, _description, _role) in enumerate(contributors, 1):
-                    problem = source.paper.research_problem.strip()
-                    if problem:
-                        lines.append(f"- [[{source.paper.title}]]：{problem} [{index}]")
-                        found_any = True
-                if not found_any:
-                    lines.append("- 尚无深度论文解读，暂不推断研究方向。")
-                lines.extend(["", "## 相关论文", ""])
-            elif kind == "method":
-                definitions = [(i, desc) for i, (_source, desc, _role) in enumerate(contributors, 1)
-                               if desc.strip()]
-                principles = [(i, method.principle) for i, (source, _, _) in enumerate(contributors, 1)
-                              for method in source.paper.methods
-                              if normalize_name(method.name) == normalize_name(spec["title"])
-                              and method.principle.strip()]
-                lines.extend(["## 方法定义", "",
-                              *([f"- {desc} [{i}]" for i, desc in definitions] or
-                                ["来源未提供明确的方法定义，暂作为方法索引。"]),
-                              "", "## 基本原理", "",
-                              *([f"- {principle} [{i}]" for i, principle in principles] or
-                                ["来源未提供可核验的原理说明。"]),
-                              "", "## 所属论文与应用场景", ""])
-            else:
-                descriptions = [(i, desc) for i, (_source, desc, _role) in enumerate(contributors, 1)
-                                if desc.strip()]
-                data_records = [(i, item) for i, (source, _, _) in enumerate(contributors, 1)
-                                for item in source.paper.datasets
-                                if normalize_name(item.name) == normalize_name(spec["title"])]
-                statistics = [(i, item.statistics) for i, item in data_records if item.statistics.strip()]
-                lines.extend(["## 数据集简介", "",
-                              *([f"- {desc} [{i}]" for i, desc in descriptions] or
-                                ["目前只有名称或提及记录，尚无独立数据集说明。"]),
-                              "", "## 任务", "",
-                              *([f"- {role} [{i}]" for i, (_, _, role) in enumerate(contributors, 1)
-                                 if role.strip()] or ["尚无经核对的任务信息。"]),
-                              "", "## 统计信息", "",
-                              *([f"- {stat} [{i}]" for i, stat in statistics] or
-                                ["来源未提供可核验的统计信息。"]),
-                              "", "## 使用该数据集的论文", "",
-                              "只有具备实验角色证据的记录才可标作使用；其他记录标为文中提及。", ""])
-            for index, (source, _description, role) in enumerate(contributors, 1):
-                if kind == "dataset":
-                    matching = [item for item in source.paper.datasets
-                                if normalize_name(item.name) == normalize_name(spec["title"])]
-                    status = matching[0].usage_status if matching else "mentioned"
-                    statuses = {"training": "用于训练", "validation": "用于验证",
-                                "testing": "用于测试", "benchmark": "用于基准评测"}
-                    label = statuses.get(status, "文中提及（用途待核对）")
-                    lines.append(f"- [[{source.paper.title}]] · {label} [{index}]")
-                else:
-                    lines.append(f"- [[{source.paper.title}]]")
-                    if kind == "method" and role.strip():
-                        lines.append("  - 应用场景：" + role + f" [{index}]")
-            lines.extend(["", "## 证据说明", "",
-                          "这是共享知识索引，不复制论文的完整摘要或实验结论；详细内容请打开对应论文页。", ""])
-        if spec["type"] == "topic":
-            summary = load_topic_synthesis(
-                self.config.root, spec["title"],
-                [(source.source_id, source.paper) for source, _, _ in contributors],
-            )
-            if summary is not None:
-                references = {source.source_id: i for i, (source, _, _) in enumerate(contributors, 1)}
-                lines.extend(["## 深度跨论文综合（待人工复核）", "",
-                              "以下结论由模型根据结构化抽取记录生成，并非已核实的原文级事实。", ""])
-                for heading, key in (("研究发现与比较", "claims"), ("开放问题", "open_questions")):
-                    lines.extend(["### " + heading, ""])
-                    for item in summary.get(key, []):
-                        nums = [references.get(source_id) for source_id in item.get("source_ids", [])]
-                        if all(nums) and nums:
-                            citations = " ".join(f"[{num}]" for num in nums)
-                            lines.append("- " + str(item["text"]) + " " + citations)
+            heading = {"method": "方法在不同研究中的用途", "dataset": "数据集在不同研究中的用途", "topic": "研究问题与跨来源比较"}[spec["type"]]
+            lines = ["# " + literal(self._display_title(spec)), "", "## 稳定问题", "", f"{literal(spec['title'])} 在这些论文中如何定义、使用，其证据和适用边界是什么？", "", "## " + heading, ""]
+            for index, (source, claim) in enumerate(claims, 1):
+                lines.extend(["### [[" + source.paper.title + "]]", "",
+                              literal(claim["statement"]) + f" [{index}]", ""])
+            lines.extend(["## 证据边界", "", "仅列出已核验 Claim 对该实体的明确关联。未将论文的其它结论或局限性自动归入此页；共享术语不代表实验条件或结论一致。", ""])
+            lines.extend(["<!-- pending-reading:start -->", "## 待核验解读", "",
+                          "以下描述仍需原文级人工审核，不进入事实问答。", ""])
+            template = {"method": ("方法定义", "基本原理", "所属论文与应用场景"),
+                        "dataset": ("数据集简介", "任务", "统计信息", "使用该数据集的论文"),
+                        "topic": ("概念简介", "研究方向分类", "相关论文")}[spec["type"]]
+            for heading in template:
+                lines.extend(["## " + heading, ""])
+                for source, description, role in contributors:
+                    values = source.paper.methods if spec["type"] == "method" else source.paper.datasets
+                    entity = next((item for item in values if self.entities.resolve(spec["type"], item.name)["canonical_id"] == spec["id"]), None) if spec["type"] != "topic" else None
+                    text = (getattr(entity, "principle", "") if heading == "基本原理" else
+                            getattr(entity, "statistics", "") if heading == "统计信息" else
+                            role if heading in {"任务", "所属论文与应用场景"} else
+                            source.paper.research_problem if heading == "研究方向分类" else description)
+                    lines.append("- [[" + source.paper.title + "]]：" + (literal(text) if text else "仅作来源索引；尚无已核验统一说明。"))
+                lines.append("")
+            if spec["type"] == "topic":
+                summary = load_topic_synthesis(self.config.root, spec["title"], [(source.source_id, source.paper) for source, _, _ in contributors])
+                if summary:
+                    lines.extend(["## 深度跨论文综合（待人工复核）", "", "模型综合未升级为 supported 事实。", ""])
+                    if int(summary.get("batch_count") or 1) > 1:
+                        lines.extend([f"本次按上下文预算分为 {int(summary['batch_count'])} 批；仅保证批内比较，不宣称完成所有来源之间的两两比较。", ""])
+                    for key in ("claims", "open_questions"):
+                        for point in summary.get(key, []):
+                            lines.append("- " + literal(point.get("text", "")) + " · 来源：" + ", ".join(str(value) for value in point.get("source_ids", [])))
                     lines.append("")
+            lines.extend(["<!-- pending-reading:end -->", ""])
         lines.extend(["## 来源证据", ""])
-        for index, ((source, _, _), span) in enumerate(zip(contributors, evidence), 1):
-            label = "原文命中" if span["confidence"] == "exact_text" else "来源摘录（未定位到主题原词，不代表逐条论断已核验）"
-            lines.extend([f"### [{index}] {source.paper.title}", "", f"来源：`{source.raw_path}` · 第 {span['page_number']} 页 · 第 {span['paragraph']} 段 · `{span['locator']}` · {label}", "", *[("> " + line).rstrip() for line in span["evidence_text"].splitlines()], ""])
+        for index, ((source, claim), span) in enumerate(zip(claims, evidence), 1):
+            lines.extend([f"### [{index}] {literal(source.paper.title)}", "",
+                          f"Claim：`{claim['claim_id']}` · 来源：`{source.raw_path}` · 第 {span['page_number']} 页 · `{span['locator']}` · 已核验原文片段", "",
+                          *[("> " + literal(line)).rstrip() for line in span["evidence_text"].splitlines()], ""])
         generated = "---\n" + yaml.safe_dump(front, allow_unicode=True, sort_keys=False).rstrip() + "\n---\n\n" + "\n".join(lines).rstrip()
         return generated, evidence
 
     def _prepare(self) -> Tuple[Dict[str, Any], Dict[Path, str], Dict[str, Any], List[_Source]]:
+        # A service may be reused after inputs change. Seen identities only belong
+        # to this preparation, not earlier previews.
+        self.entities = EntityRegistry()
         sources, inventory, diagnostics = self._sources()
         previous = self.manifest()
-        if self.manifest_path.exists() and previous.get("compiler") != COMPILER:
+        if self.manifest_path.exists() and previous.get("compiler") not in {COMPILER, LEGACY_COMPILER}:
             diagnostics.append({"severity": "error", "code": "manifest_conflict", "message": "已有 manifest.json 不是当前编译器的清单，不能覆盖。", "path": self._relative(self.manifest_path)})
         specs = self._specs(sources)
         self._choose_paths(specs, previous, diagnostics)
@@ -492,45 +521,76 @@ class CompilationService:
             old = path.read_text(encoding="utf-8") if path.exists() else None
             changes["created" if old is None else "unchanged" if old == content else "updated"].append(relative)
             planned[path] = content
-            pages.append({"id": spec["id"], "title": spec["title"], "display_title": self._display_title(spec),
-                          "type": spec["type"], "path": relative,
+            pages.append({"id": spec["id"], "title": spec["title"], "display_title": self._display_title(spec), "type": spec["type"], "path": relative,
                           "sources": [item[0].source_id for item in spec["contributors"]], "links": wiki_links(generated),
-                          "generated_sha256": _digest(self.wiki._generated_part(content)), "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(), "evidence": evidence})
-            descriptions = {description.strip() for _, description, _ in spec["contributors"] if description.strip()}
-            if len(descriptions) > 1:
-                diagnostics.append({"severity": "info", "code": "multiple_source_descriptions", "message": "各来源对同一对象有不同描述，已分别保留以供比较；未自动判定为冲突。", "path": relative})
-            for span in evidence:
-                if span["confidence"] != "exact_text":
-                    diagnostics.append({"severity": "warning", "code": "fallback_evidence", "message": "未命中主题原词，显示来源摘录；需要人工复核具体论断。", "path": relative, "source_id": span["source_id"]})
+                          "generated_sha256": _digest(self.wiki._generated_part(content)), "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(), "evidence": evidence,
+                          "claim_ids": [claim["claim_id"] for _, claim in spec["claims"]],
+                          "claims": [{"source_id": source.source_id, "claim_id": claim["claim_id"],
+                                      "statement": claim["statement"], "claim_type": claim.get("claim_type"),
+                                      "entities": claim.get("entities", []), "attributes": claim.get("attributes", {}),
+                                      "evidence": span, "verification": claim.get("verification", {})}
+                                     for (source, claim), span in zip(spec["claims"], evidence)]})
         planned_paths = {page["path"] for page in pages}
         for old in previous.get("pages", []):
             if old.get("path") not in planned_paths:
                 changes["stale"].append(str(old.get("path")))
                 diagnostics.append({"severity": "warning", "code": "stale_page", "message": "该页面已没有当前编译输入，保留现有文件和人工笔记，请在 Review 中复核。", "path": old.get("path")})
+        excluded_paths = set(str(path) for path in previous.get("excluded_paths", []))
+        known_sources = {str(item["source_id"]) for item in inventory}
+        isolated_sources = {str(item["source_id"]) for item in inventory if item.get("isolated")}
         for path in self.wiki.all_pages():
             if path in planned:
+                excluded_paths.discard(self._relative(path))
                 continue
             relative = self._relative(path)
             changes["preserved"].append(relative)
-            front = parse_frontmatter(path.read_text(encoding="utf-8"))
+            content = path.read_text(encoding="utf-8")
+            front = parse_frontmatter(content)
             titles[normalize_name(str(front.get("title") or front.get("name") or path.stem))].append(relative)
+            page_sources = front.get("sources") or []
+            page_sources = {str(page_sources)} if isinstance(page_sources, str) else {str(value) for value in page_sources} if isinstance(page_sources, list) else set()
+            if front.get("source_hash"):
+                page_sources.add(str(front["source_hash"]))
+            managed = str(front.get("generated_by") or "").startswith("researchwiki.compiler.")
+            legacy = NOTE_START in content and NOTE_END in content and bool(page_sources & known_sources)
+            if managed or legacy or page_sources & isolated_sources:
+                excluded_paths.add(relative)
+                diagnostics.append({"severity": "warning", "code": "historical_page_quarantined", "path": relative,
+                                    "message": "保留历史页面和个人笔记；该页没有当前编译确认的事实，不进入检索、图谱和问答。"})
         for page in pages:
             for link in page["links"]:
                 if normalize_name(link) not in titles:
                     diagnostics.append({"severity": "warning", "code": "broken_link", "message": "内链缺少目标页面：" + link, "path": page["path"]})
-        stable_sources = [{"id": source.source_id, "sha256": source.source_id, "title": source.paper.title, "path": source.raw_path, "extraction_sha256": source.extraction_hash} for source in sources]
+        stable_sources = [{"id": source.source_id, "sha256": source.source_id, "title": source.paper.title,
+                           "path": source.raw_path, "extraction_sha256": source.extraction_hash,
+                           "claims_sha256": _digest(source.claims)} for source in sources]
         input_digest = _digest({"compiler": COMPILER, "sources": stable_sources})
         content_digest = _digest([{key: page[key] for key in ("id", "path", "generated_sha256")} for page in pages])
+        excluded_wiki_paths = []
+        for relative in sorted(excluded_paths):
+            try:
+                excluded_wiki_paths.append((self.config.root / relative).resolve().relative_to(self.config.wiki_root.resolve()).as_posix())
+            except ValueError:
+                # Historical/tampered manifest entries outside the Wiki root
+                # never become an exclusion of arbitrary workspace files.
+                continue
         manifest = {"schema_version": SCHEMA_VERSION, "compiler": COMPILER, "input_digest": input_digest,
-                    "content_digest": content_digest, "sources": stable_sources, "pages": pages}
+                    "content_digest": content_digest, "sources": stable_sources, "pages": pages,
+                    "entities": self.entities.records(), "excluded_paths": sorted(excluded_paths),
+                    "excluded_wiki_paths": excluded_wiki_paths}
         for name in ("index.md", "log.md"):
             target = self.config.wiki_root / name
             if target.exists() and not parse_frontmatter(target.read_text(encoding="utf-8")).get("compiler_auxiliary"):
                 diagnostics.append({"severity": "error", "code": "auxiliary_conflict", "message": f"已有 {name} 是人工文档，不能覆盖。", "path": self._relative(target)})
-        report = {"status": "blocked" if not sources or any(item["severity"] == "error" for item in diagnostics) else "ready",
+        can_reconcile_empty = previous.get("compiler") in {COMPILER, LEGACY_COMPILER}
+        report = {"status": "blocked" if (not sources and not isolated_sources and not can_reconcile_empty) or any(item["severity"] == "error" for item in diagnostics) else "ready",
                   "source_count": len(inventory), "ready_sources": len(sources), "skipped_sources": len(inventory) - len(sources),
                   "page_count": len(pages), "page_types": dict(Counter(page["type"] for page in pages)), "sources": inventory,
-                  "changes": changes, "diagnostics": diagnostics, "input_digest": input_digest, "content_digest": content_digest}
+                  "changes": changes, "diagnostics": diagnostics, "input_digest": input_digest, "content_digest": content_digest,
+                  "supported_claims": sum(item.get("supported_claims", 0) for item in inventory),
+                  "pending_claims": sum(item.get("pending_claims", 0) for item in inventory),
+                  "excluded_paths": sorted(excluded_paths),
+                  "paper_paths": {page["sources"][0]: page["path"] for page in pages if page["type"] == "paper"}}
         return report, planned, manifest, sources
 
     def inventory(self) -> Dict[str, Any]:
@@ -545,9 +605,14 @@ class CompilationService:
                     relative = (self.config.root / page["path"]).relative_to(self.config.wiki_root).as_posix()
                     lines.append(f"- [{page.get('display_title') or page['title']}]({relative}) · {len(page['sources'])} 个来源")
             lines.append("")
-        return "\n".join(lines)
+        return "\n".join(lines).rstrip() + "\n"
 
-    def run(self) -> Dict[str, Any]:
+    def run(self, source_id: Optional[str] = None) -> Dict[str, Any]:
+        """Compile the corpus once for both ingestion and explicit rebuilds.
+
+        ``source_id`` selects the returned paper path, not a partial aggregation:
+        entity pages always use the same full verified corpus as a rebuild.
+        """
         started = _utc()
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "-" + uuid.uuid4().hex[:8]
         report_path = self.state_dir / "runs" / (run_id + ".json")
@@ -557,14 +622,21 @@ class CompilationService:
             report.update(inventory, id=run_id, started_at=started)
             if inventory["status"] != "ready":
                 raise ValueError("没有可编译的资料，或检测到完整性/文件归属冲突；请查看诊断。")
+            if source_id is not None and source_id not in inventory["paper_paths"]:
+                raise ValueError("当前资料未通过编译质量门禁，请查看诊断。")
             if any(_file_hash(source.raw) != source.source_id for source in sources):
                 raise ValueError("准备期间原始资料发生变化，未提交任何 Wiki 文件。")
             index_path = self.config.wiki_root / "index.md"
             log_path = self.config.wiki_root / "log.md"
             report.update(status="succeeded", finished_at=_utc(), raw_unchanged=True,
                           manifest_path=self._relative(self.manifest_path), index_path=self._relative(index_path), log_path=self._relative(log_path))
+            if source_id is not None:
+                report["paper_path"] = inventory["paper_paths"][source_id]
             old_log = log_path.read_text(encoding="utf-8") if log_path.exists() else "---\ncompiler_auxiliary: true\ngenerated_by: " + COMPILER + "\n---\n\n# 知识维护记录\n"
             log_entry = f"\n## {report['finished_at']} · {run_id}\n\n- 来源：{len(sources)}；页面：{len(manifest['pages'])}；新增：{len(inventory['changes']['created'])}；更新：{len(inventory['changes']['updated'])}；未变：{len(inventory['changes']['unchanged'])}。\n- 输入：`{manifest['input_digest']}`\n- 内容：`{manifest['content_digest']}`\n- 原始文件哈希保持不变；编译未调用语言模型。\n"
+            # Reverified Claim caches share the Wiki rollback boundary: preview
+            # does not mutate evidence status.
+            planned.update({self.config.root / "data" / "claims" / (source.source_id + ".json"): _json(source.claims) for source in sources})
             planned.update({self.manifest_path: _json(manifest), index_path: self._index(manifest), log_path: old_log.rstrip() + "\n" + log_entry, report_path: _json(report)})
             # WikiManager restores previously replaced files on any write error.
             self.wiki._commit(planned)
@@ -575,8 +647,8 @@ class CompilationService:
             return report
 
 
-def compile_wiki(config: Config) -> Dict[str, Any]:
-    return CompilationService(config).run()
+def compile_wiki(config: Config, source_id: Optional[str] = None, database: Optional[Database] = None) -> Dict[str, Any]:
+    return CompilationService(config, database=database).run(source_id=source_id)
 
 
 def compilation_status(config: Config) -> Dict[str, Any]:

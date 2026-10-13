@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
 
@@ -22,11 +22,12 @@ from ..compilation import CompilationService, compilation_status
 from ..config import Config, load_config
 from ..graph import extract_graph
 from ..graph.research import project_research_graph
-from ..index.database import Database
+from ..index.database import Database, IngestJobConflict
 from ..llm.client import LLMClient
 from ..parsing.pdf import parse_file
 from ..secrets import read_deepseek_key, save_deepseek_key, delete_deepseek_key
 from ..wiki.manager import parse_frontmatter
+from ..verification import ClaimsService
 
 
 LOGGER = logging.getLogger("researchwiki.web")
@@ -42,6 +43,14 @@ _SETTINGS_LOCK = threading.Lock()
 class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     top_k: Optional[int] = Field(default=None, ge=1, le=20)
+    evidence_scope: str = Field(default="hybrid", pattern="^(hybrid|wiki)$")
+
+
+class ClaimReviewRequest(BaseModel):
+    status: str = Field(pattern="^(supported|contradicted|insufficient|pending_review)$")
+    reason: str = Field(min_length=1, max_length=2000)
+    statement: Optional[str] = Field(default=None, min_length=1, max_length=10000)
+    quote: Optional[str] = Field(default=None, max_length=10000)
 
 
 class DeepSeekCredentialRequest(BaseModel):
@@ -132,7 +141,7 @@ def _document(
         "error_message": paper.get("error_message") or None,
         "retryable": str(paper.get("status")) == "FAILED" and bool(raw_path or source_path),
         "quality": _quality(config, paper),
-        "job": job,
+        "job": {**job, "source_path": _relative_name(config.root, str(job.get("source_path") or ""))} if job else None,
     }
     if include_extraction:
         extraction_path = config.root / "data" / "extractions" / (result["id"] + ".json")
@@ -174,6 +183,9 @@ def _drain_ingest_queue(root: Path) -> None:
                     resume=True,
                     quality_mode=str(job.get("quality_mode") or "basic"),
                     job_id=int(job["id"]),
+                    focus=str(job.get("focus") or ""),
+                    force_refresh=bool(job.get("force_refresh")),
+                    operation=str(job.get("operation") or "ingest"),
                 )
             except Exception as exc:  # ingest persists FAILED before returning here
                 LOGGER.warning("Background ingest job %s failed for %s: %s", job["id"], source.name, exc)
@@ -219,7 +231,7 @@ def _public_answer(config: Config, result: Dict[str, Any], question: str) -> Dic
     result["question"] = question
     result["degraded"] = result.get("mode") == "local_evidence" and bool(result.get("fallback_reason"))
     result["answer"] = str(result.get("answer") or "").replace(str(config.root.resolve()) + "/", "")
-    result["sources"] = [{**source, "path": _relative_name(config.root, str(source.get("path") or "")),
+    result["sources"] = [{**_public_evidence(config, source), "path": _relative_name(config.root, str(source.get("path") or "")),
                           "provenance": [_public_evidence(config, value) for value in source.get("provenance") or []]}
                          for source in result.get("sources") or []]
     return result
@@ -249,6 +261,15 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     app = FastAPI(title="ResearchWiki", version=__version__, lifespan=lifespan)
     app.state.config = config
     app.state.ingest_executor = ingest_executor
+    identity_db = Database(config.db_path)
+    try:
+        library_id = identity_db.library_id
+    finally:
+        identity_db.close()
+
+    @app.exception_handler(IngestJobConflict)
+    async def active_job_conflict(_request: Request, exc: IngestJobConflict) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     if STATIC_ROOT.exists():
         app.mount("/assets", StaticFiles(directory=str(STATIC_ROOT)), name="assets")
@@ -259,7 +280,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             "status": "ok",
             "service": "researchwiki",
             "version": __version__,
-            "storage": {"type": "sqlite", "ready": config.db_path.exists()},
+            "storage": {"type": "sqlite", "ready": config.db_path.exists(), "library_id": library_id},
             "retrieval": {
                 "type": "hybrid",
                 "lexical": "sqlite-fts5",
@@ -427,7 +448,11 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     def retry_document(
         paper_id: str,
         quality_mode: str = Query(default="", max_length=16),
+        force_refresh: bool = False, force: bool = False, confirm: bool = False,
     ) -> Dict[str, Any]:
+        refresh = force_refresh or force
+        if refresh and not confirm:
+            raise HTTPException(status_code=400, detail="Set confirm=true to discard checkpoints and invalidate previous approvals")
         db = Database(config.db_path)
         try:
             paper = db.get_paper(paper_id)
@@ -435,7 +460,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 paper = None
             if not paper:
                 raise HTTPException(status_code=404, detail="Document not found")
-            if str(paper.get("status")) != "FAILED":
+            if str(paper.get("status")) != "FAILED" and not refresh:
                 raise HTTPException(status_code=409, detail="Only failed documents can be retried")
             candidates = [
                 Path(value)
@@ -449,15 +474,16 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             requested_mode = quality_mode.strip().lower() or str((previous_job or {}).get("quality_mode") or config.quality_mode)
             if requested_mode not in {"basic", "standard", "high"}:
                 raise HTTPException(status_code=400, detail="quality_mode must be basic, standard or high")
-            db.update_paper_status(paper_id, "UPLOADED")
-            job = db.retry_ingest_job(int(previous_job["id"]), requested_mode) if previous_job else None
+            job = db.retry_ingest_job(int(previous_job["id"]), requested_mode, force_refresh=refresh) if previous_job else None
             if job is None:
                 job = db.enqueue_ingest_job(
                     paper_id,
                     str(source),
                     quality_mode=requested_mode,
                     max_attempts=config.max_ingest_attempts,
+                    force_refresh=refresh,
                 )
+            db.update_paper_status(paper_id, "UPLOADED")
             updated = db.get_paper(paper_id)
         finally:
             db.close()
@@ -468,56 +494,60 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
     def enrich_document(
         paper_id: str,
         quality_mode: str = Query(default="standard", pattern="^(standard|high)$"),
+        force_refresh: bool = False, force: bool = False, confirm: bool = False,
     ) -> Dict[str, Any]:
         """Explicitly reprocess an existing document with optional LLM analysis."""
         if not LLMClient(config.llm).enabled:
             raise HTTPException(status_code=409, detail="Deep extraction requires a configured model API key")
+        refresh = force_refresh or force
+        if refresh and not confirm:
+            raise HTTPException(status_code=400, detail="Set confirm=true to force a paid recomputation and invalidate approvals")
         with _UPLOAD_LOCK:
             db = Database(config.db_path)
             try:
                 paper = db.get_paper(paper_id)
-                if not paper or str(paper.get("status")) != "INDEXED":
-                    raise HTTPException(status_code=409, detail="Only indexed documents can be enriched")
+                if not paper or str(paper.get("status")) == "DELETED" or not db.count_source_chunks(paper_id):
+                    raise HTTPException(status_code=409, detail="Import basic source text before deep enrichment")
                 candidates = [Path(v) for v in (str(paper.get("raw_path") or ""), str(paper.get("source_path") or "")) if v]
                 source = next((p for p in candidates if p.is_file()), None)
                 if source is None:
                     raise HTTPException(status_code=409, detail="Original source file is missing")
-                job = db.enqueue_ingest_job(paper_id, str(source), quality_mode, config.max_ingest_attempts)
+                job = db.enqueue_ingest_job(paper_id, str(source), quality_mode, config.max_ingest_attempts,
+                                           force_refresh=refresh, operation="enrich")
             finally:
                 db.close()
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"action": "queued", "job": job, "source_id": paper_id}
 
-    @app.post("/api/documents/{paper_id}/supplement")
+    @app.post("/api/documents/{paper_id}/supplement", status_code=202)
     def supplement_document(
         request: Request,
         paper_id: str,
         focus: str = Query(pattern="^(method|experiment|overview)$"),
+        force_refresh: bool = False, force: bool = False, confirm: bool = False,
     ) -> Dict[str, Any]:
         """Explicit on-demand update of a single research facet."""
         _check_local_settings_write(request)
         if not LLMClient(config.llm).enabled:
             raise HTTPException(status_code=409, detail="Focused extraction requires a model API key")
-        if not _INGEST_LOCK.acquire(blocking=False):
-            raise HTTPException(status_code=409, detail="An extraction or compilation is already running")
-        try:
+        refresh = force_refresh or force
+        if refresh and not confirm:
+            raise HTTPException(status_code=400, detail="Set confirm=true to force a paid recomputation and invalidate approvals")
+        with _UPLOAD_LOCK:
             db = Database(config.db_path)
             try:
                 paper = db.get_paper(paper_id)
-                if not paper or paper.get("status") != "INDEXED":
-                    raise HTTPException(status_code=409, detail="Only indexed sources can be supplemented")
+                if not paper or paper.get("status") == "DELETED" or not db.count_source_chunks(paper_id):
+                    raise HTTPException(status_code=409, detail="Import basic source text before supplementing")
                 raw = Path(str(paper.get("raw_path") or ""))
                 if not raw.is_file() or hashlib.sha256(raw.read_bytes()).hexdigest() != paper_id:
                     raise HTTPException(status_code=409, detail="Original source unavailable or changed")
+                job = db.enqueue_ingest_job(paper_id, str(raw), "standard", config.max_ingest_attempts,
+                                           force_refresh=refresh, operation="supplement", focus=focus)
             finally:
                 db.close()
-            from ..app import ingest
-            result = ingest(config, raw, resume=True, quality_mode="standard", focus=focus)
-            return {"ok": True, "focus": focus, "document": result}
-        except RuntimeError as exc:
-            raise HTTPException(status_code=502, detail="Focused extraction failed; previous content preserved") from exc
-        finally:
-            _INGEST_LOCK.release()
+        app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
+        return {"action": "queued", "focus": focus, "job": job, "source_id": paper_id}
 
     @app.delete("/api/documents/{paper_id}")
     def remove_document(
@@ -550,10 +580,13 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         return {"items": items, "total": len(items)}
 
     @app.post("/api/jobs/{job_id}/retry", status_code=202)
-    def retry_job(job_id: int) -> Dict[str, Any]:
+    def retry_job(job_id: int, force_refresh: bool = False, force: bool = False, confirm: bool = False) -> Dict[str, Any]:
+        refresh = force_refresh or force
+        if refresh and not confirm:
+            raise HTTPException(status_code=400, detail="Set confirm=true to force recomputation")
         db = Database(config.db_path)
         try:
-            job = db.retry_ingest_job(job_id)
+            job = db.retry_ingest_job(job_id, force_refresh=refresh)
             if not job:
                 raise HTTPException(status_code=409, detail="Only failed, cancelled, or paused jobs can be retried")
             db.update_paper_status(str(job["source_id"]), "UPLOADED")
@@ -588,6 +621,67 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         for item in items:
             item["page_path"] = _relative_name(config.root, str(item.get("page_path") or ""))
         return {"items": items, "total": len(items)}
+
+    @app.get("/api/claims")
+    def list_claims(source_id: str = Query(default="", max_length=64),
+                    status: str = Query(default="", pattern="^(|supported|contradicted|insufficient|pending_review)$"),
+                    limit: int = Query(default=200, ge=1, le=500)) -> Dict[str, Any]:
+        service = ClaimsService(config)
+        if source_id and not re.fullmatch(r"[a-f0-9]{64}", source_id):
+            raise HTTPException(status_code=422, detail="Invalid source ID")
+        db = Database(config.db_path)
+        try:
+            papers = db.list_papers(page=1, page_size=10000)["items"]
+        finally:
+            db.close()
+        paths = {}
+        manifest = CompilationService(config).manifest()
+        for page in manifest.get("pages", []):
+            for claim in page.get("claims", []):
+                paths.setdefault(claim["claim_id"], []).append({"title": page["title"], "path": page["path"]})
+        items, summary = [], {}
+        for paper in papers:
+            if source_id and source_id != paper["id"]:
+                continue
+            try:
+                bundle = service.load(paper["id"])
+            except (OSError, ValueError):
+                continue
+            for claim in bundle.get("claims", []):
+                state = str(claim.get("verification", {}).get("status") or "insufficient")
+                summary[state] = summary.get(state, 0) + 1
+                if not status or state == status:
+                    evidence = _public_evidence(config, {**claim.get("evidence", {}), "source_id": paper["id"]})
+                    items.append({**claim, "evidence": evidence, "source_title": paper["title"], "wiki_pages": paths.get(claim["claim_id"], []),
+                                  "file_url": "/api/documents/" + paper["id"] + "/file?inline=true"})
+        return {"items": items[:limit], "total": len(items), "summary": summary, "truncated": len(items) > limit}
+
+    @app.post("/api/documents/{source_id}/claims/{claim_id}/review")
+    def review_claim(source_id: str, claim_id: str, request: ClaimReviewRequest) -> Dict[str, Any]:
+        service = ClaimsService(config)
+        try:
+            with _INGEST_LOCK:
+                path = service.path(source_id)
+                previous = path.read_bytes() if path.is_file() else None
+                claim = service.review(source_id, claim_id, request.status, request.reason,
+                                       statement=request.statement, quote=request.quote)
+                report = CompilationService(config).run()
+                if report.get("status") != "succeeded":
+                    if previous is not None:
+                        service.write(path, json.loads(previous))
+                    else:
+                        path.unlink(missing_ok=True)
+                    raise ValueError("审核与重编译未生效：" + str(report.get("error") or report.get("diagnostics")))
+                try:
+                    stats = rebuild(config)
+                except Exception as exc:
+                    return {"claim": claim, "saved": True, "compilation": {"status": report["status"], "id": report["id"]},
+                            "index": None, "reindex_error": str(exc), "message": "审核与 Wiki 已保存；索引未完成，请重新构建索引。"}
+                return {"claim": claim, "compilation": {"status": report["status"], "id": report["id"]}, "index": stats}
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/reviews/{review_id}/resolve")
     def resolve_review(review_id: int) -> Dict[str, Any]:
@@ -627,7 +721,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         target = next((value for value in document.pages if value.number == page), None)
-        if target is None or start > len(target.text) or (end and end < start):
+        if target is None or start > len(target.text) or (end and (end < start or end > len(target.text))):
             raise HTTPException(status_code=422, detail="Evidence locator is outside the parsed source")
         stop = min(end or start + 4000, len(target.text), start + 10000)
         return {"source_id": paper_id, "page_number": page, "char_start": start, "char_end": stop,
@@ -743,11 +837,21 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         declared_sources = metadata.get("sources") or []
         if not isinstance(declared_sources, list):
             declared_sources = []
+        compiled_page = next((item for item in CompilationService(config).manifest().get("pages", []) if item["path"] == page["path"]), {})
+        claim_order = {item["claim_id"]: index for index, item in enumerate(compiled_page.get("evidence", []), 1) if item.get("claim_id")}
         order = {str(value): index for index, value in enumerate(declared_sources, 1)}
-        sources = sorted(page.get("sources") or [], key=lambda source: order.get(str(source.get("source_id")), len(order) + 1))
-        page["sources"] = [{**_public_evidence(config, source),
-                            "citation_index": order.get(str(source.get("source_id")), index)}
-                           for index, source in enumerate(sources, 1)]
+        def citation_order(source: Dict[str, Any]) -> int:
+            return claim_order.get(str(source.get("claim_id")), order.get(str(source.get("source_id")), len(order) + len(claim_order) + 1))
+        sources = sorted(page.get("sources") or [], key=citation_order)
+        numbered = []
+        fallback_index = max(claim_order.values(), default=0)
+        for source in sources:
+            citation_index = claim_order.get(str(source.get("claim_id")))
+            if citation_index is None:
+                fallback_index += 1
+                citation_index = fallback_index
+            numbered.append({**_public_evidence(config, source), "citation_index": citation_index})
+        page["sources"] = numbered
         page["backlinks"] = [{**item, "path": _relative_name(config.root, str(item["path"]))} for item in backlinks]
         page["outgoing"] = [{**item, "path": _relative_name(config.root, str(item["path"]))} for item in outgoing]
         page["related"] = [
@@ -854,6 +958,9 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "page_number": page,
                 "locator": row["locator"], "char_start": row["char_start"],
                 "char_end": row["char_end"], "excerpt": row["excerpt"],
+                "source_hash_verified": row["source_hash_verified"], "parser_version": row["parser_version"],
+                "evidence_key": row["evidence_key"], "evidence_type": "original_text",
+                "evidence_url": f"/api/documents/{row['source_id']}/evidence?page={page}&start={row['char_start']}&end={row['char_end']}",
                 "file_url": f"/api/documents/{row['source_id']}/file?inline=true#page={page}",
             })
         return {"items": items, "total": len(items), "source_kind": "original_text"}
@@ -865,7 +972,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
 
     @app.post("/api/ask")
     def ask(request: AskRequest) -> Dict[str, Any]:
-        result = do_ask_with_metadata(config, request.question, top_k=request.top_k)
+        result = do_ask_with_metadata(config, request.question, top_k=request.top_k, evidence_scope=request.evidence_scope)
         return _public_answer(config, result, request.question)
 
     @app.post("/api/ask/stream")
@@ -874,15 +981,15 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             return "event: " + name + "\ndata: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
         def generate() -> Iterator[str]:
-            yield event("status", {"stage": "retrieval", "message": "正在检索 Wiki 证据"})
+            yield event("status", {"stage": "retrieval", "message": "正在检索 Wiki 与原文证据" if request.evidence_scope == "hybrid" else "正在检索 Wiki 证据"})
             try:
-                for item in do_answer_events(config, request.question, top_k=request.top_k):
+                for item in do_answer_events(config, request.question, top_k=request.top_k, evidence_scope=request.evidence_scope):
                     payload = item["data"]
                     if item["event"] in {"sources", "result"}:
                         payload = _public_answer(config, payload, request.question)
                     yield event(item["event"], payload)
-            except Exception as exc:
-                yield event("error", {"message": str(exc)})
+            except Exception:
+                yield event("error", {"message": "回答流中断；请重新查询，未完成的回答不能作为结论。"})
         return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.get("/api/settings")
