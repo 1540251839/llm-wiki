@@ -162,19 +162,6 @@ class Database:
           generated_at TEXT NOT NULL, node_count INTEGER NOT NULL,
           edge_count INTEGER NOT NULL, digest TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS evaluation_runs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, profile TEXT NOT NULL,
-          status TEXT NOT NULL, score REAL NOT NULL DEFAULT 0,
-          metrics TEXT NOT NULL, question_count INTEGER NOT NULL,
-          started_at TEXT, finished_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS evaluation_cases (
-          id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
-          question_id TEXT NOT NULL, question TEXT NOT NULL,
-          expected_no_evidence INTEGER NOT NULL DEFAULT 0,
-          mode TEXT NOT NULL, answer TEXT NOT NULL, sources TEXT NOT NULL,
-          metrics TEXT NOT NULL
-        );
         CREATE INDEX IF NOT EXISTS idx_pages_type ON wiki_pages(type);
         CREATE INDEX IF NOT EXISTS idx_aliases_alias ON aliases(alias);
         CREATE INDEX IF NOT EXISTS idx_sources_sha256 ON sources(sha256);
@@ -186,7 +173,6 @@ class Database:
         CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status, created_at);
         CREATE INDEX IF NOT EXISTS idx_graph_nodes_type ON graph_nodes(type,name);
         CREATE INDEX IF NOT EXISTS idx_graph_edges_semantic ON graph_edges(semantic,source,target);
-        CREATE INDEX IF NOT EXISTS idx_evaluation_runs_profile ON evaluation_runs(profile,id);
         """)
         paper_columns = {str(row[1]) for row in self.conn.execute("PRAGMA table_info(papers)")}
         if "error_message" not in paper_columns:
@@ -899,53 +885,6 @@ class Database:
             if str(edge["source"]) in node_ids and str(edge["target"]) in node_ids
         ]
         return {**overview, "nodes": nodes, "edges": edges, "truncated": overview["stats"]["nodes"] > len(nodes)}
-
-    def create_evaluation_run(self, profile: str, metrics: Dict[str, Any], cases: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-        score = float(metrics.get("score") or 0.0)
-        cursor = self.conn.execute(
-            """INSERT INTO evaluation_runs(profile,status,score,metrics,question_count,started_at,finished_at)
-               VALUES(?,'SUCCEEDED',?,?,?,datetime('now'),datetime('now'))""",
-            (profile, score, json.dumps(metrics, ensure_ascii=False), len(cases)),
-        )
-        run_id = int(cursor.lastrowid)
-        for case in cases:
-            self.conn.execute(
-                """INSERT INTO evaluation_cases(
-                     run_id,question_id,question,expected_no_evidence,mode,answer,sources,metrics
-                   ) VALUES(?,?,?,?,?,?,?,?)""",
-                (
-                    run_id, case["question_id"], case["question"], int(bool(case.get("expected_no_evidence"))),
-                    case["mode"], case["answer"], json.dumps(case.get("sources") or [], ensure_ascii=False),
-                    json.dumps(case.get("metrics") or {}, ensure_ascii=False),
-                ),
-            )
-        self.conn.commit()
-        return self.get_evaluation_run(run_id) or {}
-
-    def get_evaluation_run(self, run_id: int) -> Optional[Dict[str, Any]]:
-        row = self.conn.execute("SELECT * FROM evaluation_runs WHERE id=?", (run_id,)).fetchone()
-        if not row:
-            return None
-        value = dict(row)
-        value["metrics"] = json.loads(str(value.get("metrics") or "{}"))
-        cases = self.conn.execute("SELECT * FROM evaluation_cases WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
-        value["cases"] = []
-        for case_row in cases:
-            case = dict(case_row)
-            case["sources"] = json.loads(str(case.get("sources") or "[]"))
-            case["metrics"] = json.loads(str(case.get("metrics") or "{}"))
-            case["expected_no_evidence"] = bool(case.get("expected_no_evidence"))
-            value["cases"].append(case)
-        return value
-
-    def list_evaluation_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM evaluation_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-        values: List[Dict[str, Any]] = []
-        for row in rows:
-            value = dict(row)
-            value["metrics"] = json.loads(str(value.get("metrics") or "{}"))
-            values.append(value)
-        return values
 
     @staticmethod
     def _paper_dict(row: sqlite3.Row) -> Dict[str, Any]:
