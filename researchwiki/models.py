@@ -24,6 +24,7 @@ class EntityMention:
     principle: str = ""
     statistics: str = ""
     name_zh: str = ""
+    usage_status: str = "mentioned"  # mentioned | training | validation | testing | benchmark
 
 
 @dataclass
@@ -46,6 +47,7 @@ class StructuredPaper:
     limitations: List[str] = field(default_factory=list)
     topics: List[str] = field(default_factory=list)
     topic_labels_zh: Dict[str, str] = field(default_factory=dict)
+    field_evidence: List[Dict[str, Any]] = field(default_factory=list)
     source_path: str = ""
     source_hash: str = ""
 
@@ -68,6 +70,7 @@ class StructuredPaper:
                         principle=str(value.get("principle") or ""),
                         statistics=str(value.get("statistics") or ""),
                         name_zh=str(value.get("name_zh") or ""),
+                        usage_status=str(value.get("usage_status") or "mentioned"),
                     ))
             return result
 
@@ -99,6 +102,7 @@ class StructuredPaper:
                 for name, label in data["topic_labels_zh"].items()
                 if str(name).strip() and str(label).strip()
             } if isinstance(data.get("topic_labels_zh"), dict) else {},
+            field_evidence=[dict(x) for x in (data.get("field_evidence") or []) if isinstance(x, dict)],
             source_path=str(data.get("source_path") or ""),
             source_hash=str(data.get("source_hash") or ""),
         )

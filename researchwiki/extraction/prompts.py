@@ -32,19 +32,20 @@ The desired schema is:
   "research_problem": "string",
   "methodology": "string",
   "methods": [{"name": "original canonical method name", "name_zh": "short Chinese equivalent", "description": "definition from the paper", "role": "application", "principle": "explicit mechanism"}],
-  "datasets": [{"name": "original dataset name", "name_zh": "short Chinese equivalent if helpful", "description": "string", "role": "verified experimental usage or mention", "statistics": "explicit source numbers only"}],
+  "datasets": [{"name": "original dataset name", "name_zh": "short Chinese equivalent if helpful", "description": "string", "role": "experiment usage or mention", "usage_status": "mentioned|training|validation|testing|benchmark", "statistics": "explicit source numbers only"}],
   "experiment_info": "datasets, setup, baselines and metrics as explicitly stated",
   "metrics": ["string"],
   "contributions": ["string"],
   "findings": ["string"],
   "limitations": ["string"],
   "topics": ["broad topic name in its original established form"],
-  "topic_labels_zh": {"topic name above": "Chinese label"}
+  "topic_labels_zh": {"topic name above": "Chinese label"},
+  "evidence": [{"field": "research_problem or methodology or experiment_info or findings.0 or methods:Method name or datasets:Name", "quote": "exact unchanged original-language sentence from the paper supporting this field"}]
 }
 Avoid generic keywords as methods. Do not infer experiment usage from a dataset name appearing only in related work.
 Differentiate the authors' stated claims from independently established facts.
 Every statement must be supported by the supplied paper text. Missing details become empty strings/lists.
-Never output an unsupported numerical claim. No markdown fences or commentary."""
+Never output an unsupported numerical claim. Evidence quotes MUST be verbatim substrings of supplied source text. If there is no supporting quote, omit the corresponding evidence record and leave the field empty. Distinguish mentioned from experimental use. No markdown fences or commentary."""
 
 
 PAPER_ANALYSIS_SYSTEM = """You are preparing a scientific document for a traceable research wiki.
@@ -54,8 +55,8 @@ and possible ambiguities. Mark missing or uncertain facts explicitly. Do not inv
 
 
 def paper_analysis_prompt(text: str, purpose: str = "") -> str:
-    limit = 50000
-    excerpt = text if len(text) <= limit else text[:38000] + "\n...[middle omitted]...\n" + text[-12000:]
+    limit = 80000
+    excerpt = text if len(text) <= limit else text[:60000] + "\n...[middle omitted]...\n" + text[-20000:]
     purpose_block = ("WIKI PURPOSE:\n" + purpose.strip() + "\n\n") if purpose.strip() else ""
     return purpose_block + "Analyze this paper before structured extraction.\n\nPAPER TEXT:\n" + excerpt
 

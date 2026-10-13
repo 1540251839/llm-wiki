@@ -9,7 +9,6 @@ from typing import Any
 
 from .app import delete_source, do_ask, do_search, ingest, initialize, parse_only, rebuild
 from .config import load_config
-from .evaluation import run_evaluation
 from .graph import extract_graph
 from .index.database import Database
 
@@ -39,9 +38,6 @@ def _parser() -> argparse.ArgumentParser:
     compile_cmd = sub.add_parser("compile", help="compile cached paper extractions into traceable Wiki pages")
     compile_cmd.add_argument("--dry-run", action="store_true", help="inspect inputs and planned changes without writing")
     sub.add_parser("graph", help="rebuild the deterministic graph contract")
-    eval_cmd = sub.add_parser("eval", help="run the fixed replayable QA evaluation")
-    eval_cmd.add_argument("--profile", choices=("baseline", "optimized"), default="optimized")
-    eval_cmd.add_argument("--compare", action="store_true", help="run both profiles against one frozen corpus")
     jobs_cmd = sub.add_parser("jobs", help="list persistent ingestion jobs")
     jobs_cmd.add_argument("--status", default="")
     reviews_cmd = sub.add_parser("reviews", help="list open quality reviews")
@@ -112,10 +108,6 @@ def main(argv: Any = None) -> None:
                 print(json.dumps(extract_graph(database, wiki_root=config.wiki_root), ensure_ascii=False, indent=2))
             finally:
                 database.close()
-        elif args.command == "eval":
-            from .evaluation.runner import compare_profiles
-            value = compare_profiles(config) if args.compare else run_evaluation(config, profile=args.profile)
-            print(json.dumps(value, ensure_ascii=False, indent=2))
         elif args.command == "jobs":
             database = Database(config.db_path)
             try:

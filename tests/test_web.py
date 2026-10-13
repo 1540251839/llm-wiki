@@ -159,11 +159,10 @@ class ResearchWikiWebTest(unittest.TestCase):
                 self.assertNotIn("api_key", str(settings))
                 self.assertEqual(client.post("/api/settings/test").status_code, 409)
 
-                evaluation = client.post("/api/evaluation/run", params={"profile": "optimized"})
-                self.assertEqual(evaluation.status_code, 200)
-                self.assertGreaterEqual(evaluation.json()["question_count"], 16)
-                self.assertIn("source_locator_coverage", evaluation.json()["metrics"])
-                self.assertEqual(client.get("/api/evaluation/runs").json()["total"], 1)
+                # The fixed benchmark has been removed. Research Q&A remains available.
+                self.assertEqual(client.get("/api/evaluation/questions").status_code, 404)
+                self.assertEqual(client.post("/api/evaluation/run").status_code, 404)
+                self.assertEqual(client.get("/api/evaluation/runs").status_code, 404)
 
                 self.assertEqual(client.delete(f"/api/documents/{documents['items'][0]['id']}").status_code, 400)
                 deleted = client.delete(

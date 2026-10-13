@@ -5,25 +5,27 @@ import json
 import logging
 import re
 import threading
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Union
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 from .. import __version__
 from ..app import delete_source, do_ask_with_metadata, do_answer_events, do_search, ingest, initialize, rebuild
 from ..compilation import CompilationService, compilation_status
 from ..config import Config, load_config
-from ..evaluation import load_questions, run_evaluation
 from ..graph import extract_graph
+from ..graph.research import project_research_graph
 from ..index.database import Database
 from ..llm.client import LLMClient
 from ..parsing.pdf import parse_file
+from ..secrets import read_deepseek_key, save_deepseek_key, delete_deepseek_key
 from ..wiki.manager import parse_frontmatter
 
 
@@ -34,11 +36,35 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 PROCESSING_STATUSES = {"UPLOADED", "EXTRACTING", "EXTRACTED", "WIKI_CREATED"}
 _INGEST_LOCK = threading.Lock()
 _UPLOAD_LOCK = threading.Lock()
+_SETTINGS_LOCK = threading.Lock()
 
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=4000)
     top_k: Optional[int] = Field(default=None, ge=1, le=20)
+
+
+class DeepSeekCredentialRequest(BaseModel):
+    api_key: SecretStr = Field(min_length=8, max_length=512)
+
+
+def _check_local_settings_write(request: Request) -> None:
+    """Defense in depth for credential updates on a no-auth localhost server."""
+    client = request.client.host if request.client else ""
+    host = request.headers.get("host", "")
+    target = urlparse("http://" + host).hostname or ""
+    # "testclient" / "testserver" exist only in in-process FastAPI tests.
+    is_test_client = client == "testclient" and target == "testserver"
+    if not is_test_client and (client not in {"127.0.0.1", "::1"} or
+                               target not in {"localhost", "127.0.0.1", "::1"}):
+        raise HTTPException(status_code=403, detail="Model credentials can only be changed locally")
+    if request.headers.get("x-rw-config-action") != "1":
+        raise HTTPException(status_code=403, detail="Explicit settings action header required")
+    if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross-origin settings changes are forbidden")
+    origin = request.headers.get("origin")
+    if origin and urlparse(origin).netloc.lower() != host.lower():
+        raise HTTPException(status_code=403, detail="Cross-origin settings changes are forbidden")
 
 
 def _relative_name(root: Path, value: str) -> str:
@@ -285,7 +311,6 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 {"key": "wiki", "label": "Wiki 知识页", "detail": "引用 · 内链 · 人工笔记"},
                 {"key": "graph", "label": "图谱与检索", "detail": "稳定节点边 · 证据对象"},
                 {"key": "ask", "label": "可溯源问答", "detail": "流式回答 · 原文定位"},
-                {"key": "evaluation", "label": "固定题库评估", "detail": "冻结快照 · 对照回放"},
             ],
         }
 
@@ -316,6 +341,7 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             if paper and str(paper.get("status")) == "DELETED":
                 paper = None
             pages = db.list_pages_for_source(paper_id) if paper else []
+            source_chunk_count = db.count_source_chunks(paper_id) if paper else 0
             job = db.latest_ingest_job(paper_id) if paper else None
             reviews = [value for value in db.list_reviews(status="OPEN", limit=500) if value.get("source_id") == paper_id]
         finally:
@@ -328,6 +354,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             for page in pages
         ]
         result["reviews"] = reviews
+        result["original_text_indexed"] = source_chunk_count > 0
+        result["original_text_chunks"] = source_chunk_count
         return result
 
     @app.post("/api/documents", status_code=202)
@@ -459,6 +487,37 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 db.close()
         app.state.ingest_executor.submit(_drain_ingest_queue, config.root)
         return {"action": "queued", "job": job, "source_id": paper_id}
+
+    @app.post("/api/documents/{paper_id}/supplement")
+    def supplement_document(
+        request: Request,
+        paper_id: str,
+        focus: str = Query(pattern="^(method|experiment|overview)$"),
+    ) -> Dict[str, Any]:
+        """Explicit on-demand update of a single research facet."""
+        _check_local_settings_write(request)
+        if not LLMClient(config.llm).enabled:
+            raise HTTPException(status_code=409, detail="Focused extraction requires a model API key")
+        if not _INGEST_LOCK.acquire(blocking=False):
+            raise HTTPException(status_code=409, detail="An extraction or compilation is already running")
+        try:
+            db = Database(config.db_path)
+            try:
+                paper = db.get_paper(paper_id)
+                if not paper or paper.get("status") != "INDEXED":
+                    raise HTTPException(status_code=409, detail="Only indexed sources can be supplemented")
+                raw = Path(str(paper.get("raw_path") or ""))
+                if not raw.is_file() or hashlib.sha256(raw.read_bytes()).hexdigest() != paper_id:
+                    raise HTTPException(status_code=409, detail="Original source unavailable or changed")
+            finally:
+                db.close()
+            from ..app import ingest
+            result = ingest(config, raw, resume=True, quality_mode="standard", focus=focus)
+            return {"ok": True, "focus": focus, "document": result}
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail="Focused extraction failed; previous content preserved") from exc
+        finally:
+            _INGEST_LOCK.release()
 
     @app.delete("/api/documents/{paper_id}")
     def remove_document(
@@ -697,6 +756,19 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
         ]
         return page
 
+    @app.get("/api/graph/research")
+    def get_research_graph(
+        center: str = Query(default="", max_length=100),
+        depth: int = Query(default=1, ge=1, le=2),
+        limit: int = Query(default=130, ge=1, le=400),
+    ) -> Dict[str, Any]:
+        db = Database(config.db_path)
+        try:
+            return project_research_graph(db, config.root, center=center or None,
+                                          depth=depth, limit=limit)
+        finally:
+            db.close()
+
     @app.get("/api/graph")
     def get_graph(limit: int = Query(default=500, ge=1, le=2000)) -> Dict[str, Any]:
         db = Database(config.db_path)
@@ -759,6 +831,33 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             "digest": value["digest"],
         }
 
+    @app.get("/api/source-search")
+    def search_original_sources(
+        q: str = Query(min_length=1, max_length=500),
+        top_k: int = Query(default=8, ge=1, le=30),
+        source_id: str = Query(default="", max_length=64),
+    ) -> Dict[str, Any]:
+        """Search the original page text without requiring any LLM or Wiki claim."""
+        if source_id and not re.fullmatch(r"[a-f0-9]{64}", source_id):
+            raise HTTPException(status_code=422, detail="Invalid source ID")
+        db = Database(config.db_path)
+        try:
+            matched = db.search_source_chunks(q, limit=top_k, source_id=source_id)
+        finally:
+            db.close()
+        items = []
+        for row in matched:
+            page = int(row["page_number"])
+            items.append({
+                "source_id": row["source_id"], "title": row["title"],
+                "filename": Path(str(row.get("original_name") or "")).name,
+                "page_number": page,
+                "locator": row["locator"], "char_start": row["char_start"],
+                "char_end": row["char_end"], "excerpt": row["excerpt"],
+                "file_url": f"/api/documents/{row['source_id']}/file?inline=true#page={page}",
+            })
+        return {"items": items, "total": len(items), "source_kind": "original_text"}
+
     @app.get("/api/search")
     def search_wiki(q: str = Query(min_length=1, max_length=500), top_k: int = Query(default=8, ge=1, le=20)) -> Dict[str, Any]:
         results = do_search(config, q, top_k=top_k)
@@ -786,61 +885,6 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 yield event("error", {"message": str(exc)})
         return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/api/evaluation/questions")
-    def evaluation_questions() -> Dict[str, Any]:
-        items = load_questions(config)
-        return {"items": items, "total": len(items)}
-
-    @app.get("/api/evaluation/runs")
-    def evaluation_runs(limit: int = Query(default=20, ge=1, le=100)) -> Dict[str, Any]:
-        db = Database(config.db_path)
-        try:
-            items = db.list_evaluation_runs(limit=limit)
-        finally:
-            db.close()
-        return {"items": items, "total": len(items)}
-
-    @app.get("/api/evaluation/runs/{run_id}")
-    def evaluation_run(run_id: int) -> Dict[str, Any]:
-        db = Database(config.db_path)
-        try:
-            value = db.get_evaluation_run(run_id)
-        finally:
-            db.close()
-        if not value:
-            raise HTTPException(status_code=404, detail="Evaluation run not found")
-        for case in value.get("cases") or []:
-            case["answer"] = str(case.get("answer") or "").replace(str(config.root.resolve()) + "/", "")
-            for source in case.get("sources") or []:
-                source["path"] = _relative_name(config.root, str(source.get("path") or ""))
-                for evidence in source.get("provenance") or []:
-                    evidence["raw_path"] = _relative_name(config.root, str(evidence.get("raw_path") or ""))
-        return value
-
-    @app.post("/api/evaluation/run")
-    def start_evaluation(profile: str = Query(default="optimized", pattern="^(baseline|optimized)$")) -> Dict[str, Any]:
-        value = run_evaluation(config, profile=profile)
-        return evaluation_run(int(value["id"]))
-
-    @app.post("/api/evaluation/compare")
-    def compare_evaluation() -> Dict[str, Any]:
-        from ..evaluation.runner import compare_profiles
-        value = compare_profiles(config)
-        for profile in ("baseline", "optimized"):
-            value[profile] = evaluation_run(int(value[profile]["id"]))
-        value.setdefault("comparison", value.get("compare") or value.get("gate") or {})
-        value.setdefault("gate", value["comparison"])
-        return value
-
-    @app.post("/api/evaluation/runs/{run_id}/replay")
-    def replay_run(run_id: int) -> Dict[str, Any]:
-        from ..evaluation.runner import replay_evaluation
-        try:
-            value = replay_evaluation(config, run_id)
-        except (ValueError, OSError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return evaluation_run(int(value["id"]))
-
     @app.get("/api/settings")
     def settings() -> Dict[str, Any]:
         llm = LLMClient(config.llm)
@@ -853,6 +897,8 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "timeout_seconds": llm.timeout_seconds,
             },
             "wiki": {"language": config.wiki_language, "original_text_preserved": True},
+            "credentials": {"stored_locally": bool(read_deepseek_key(config.root)),
+                            "configured": llm.enabled},
             "retrieval": {
                 "top_k": config.top_k,
                 "graph_expansion": bool(config.retrieval.get("graph_expansion", True)),
@@ -860,6 +906,31 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 "max_context_chars": int(config.retrieval.get("max_context_chars", 48000)),
             },
         }
+
+    @app.post("/api/settings/deepseek-key")
+    def store_deepseek_key(request: Request, payload: DeepSeekCredentialRequest) -> Dict[str, Any]:
+        _check_local_settings_write(request)
+        secret = payload.api_key.get_secret_value().strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{8,512}", secret):
+            raise HTTPException(status_code=422, detail="Invalid API key format")
+        with _SETTINGS_LOCK:
+            save_deepseek_key(config.root, secret)
+            config.llm = {**config.llm, "provider": "deepseek",
+                          "base_url": "https://api.deepseek.com",
+                          "model": config.llm.get("model") if config.llm.get("provider") == "deepseek" else "deepseek-chat",
+                          "api_key": secret}
+        return {"ok": True, "configured": True, "stored_locally": True}
+
+    @app.delete("/api/settings/deepseek-key")
+    def clear_deepseek_key(request: Request) -> Dict[str, Any]:
+        _check_local_settings_write(request)
+        with _SETTINGS_LOCK:
+            delete_deepseek_key(config.root)
+            # Clearing a locally stored key does not revoke a provider credential,
+            # nor does it clear a key explicitly supplied by the user's environment.
+            config.llm = dict(load_config(config.root).llm)
+        return {"ok": True, "configured": LLMClient(config.llm).enabled,
+                "stored_locally": False}
 
     @app.post("/api/settings/test")
     def test_model_connection() -> Dict[str, Any]:

@@ -31,3 +31,4 @@ ingestion:
 
 parser:
   backend: pymupdf
+  grobid_url: ""  # 可选本地 GROBID: http://127.0.0.1:8070
