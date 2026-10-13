@@ -222,6 +222,7 @@ async function openDocument(id) {
         <div class="detail-cell"><span>文档 ID</span><strong title="${escapeHTML(item.id)}">${escapeHTML(item.id.slice(0, 16))}…</strong></div>
         <div class="detail-cell"><span>队列阶段</span><strong>${escapeHTML(job.stage || "—")}</strong></div>
         <div class="detail-cell"><span>处理模式 / 尝试</span><strong>${escapeHTML(extraction.extraction_mode || job.quality_mode || "basic")} · ${escapeHTML(job.attempts || 0)}/${escapeHTML(job.max_attempts || 0)}</strong></div>
+        <div class="detail-cell"><span>原文检索</span><strong>${item.original_text_indexed ? `已索引 · ${item.original_text_chunks} 个片段` : "未建立索引"}</strong></div>
       </div>
       ${reasons.length ? `<div class="notice">${reasons.map(escapeHTML).join("；")}</div>` : ""}
       ${item.error_message || job.error_message || job.last_error ? `<div class="detail-section"><h3>失败日志</h3><pre class="failure-log">${escapeHTML(item.error_message || job.error_message || job.last_error)}</pre></div>` : ""}
@@ -477,7 +478,7 @@ function openUpload() {
   const message = $("#upload-message");
   const submit = $("#upload-submit");
   const offline = $("#quality-mode").value === "basic";
-  message.textContent = offline ? "基础抽取在本机执行，不调用模型。" : state.modelConfigured ? "深度抽取将调用已配置的模型服务。" : "未配置模型密钥，请改用基础抽取。";
+  message.textContent = offline ? "快速导入将在本机建立全文索引，不调用模型。" : state.modelConfigured ? "深度解读将调用已配置的模型服务。" : "未配置模型密钥，请改用基础抽取。";
   submit.disabled = !offline && !state.modelConfigured;
   $("#upload-dialog").showModal();
 }
@@ -952,6 +953,29 @@ async function loadGraph(center = "") {
   } catch(error) {svg.innerHTML=`<text x="500" y="340" text-anchor="middle" fill="currentColor">${escapeHTML(error.message)}</text>`;}
 }
 
+async function searchOriginalSource(event) {
+  event.preventDefault();
+  const query = $("#source-search-input").value.trim();
+  if (!query) return;
+  const root = $("#source-search-results");
+  root.innerHTML = '<div class="empty-state">正在从原始论文中查找…</div>';
+  try {
+    const value = await api(`/api/source-search?q=${encodeURIComponent(query)}&top_k=12`);
+    root.innerHTML = (value.items || []).map(item => `
+      <article class="original-result">
+        <div class="original-result-head">
+          <strong>${escapeHTML(item.title || item.filename)}</strong>
+          <small>第 ${escapeHTML(item.page_number)} 页 · 原文直接命中</small>
+        </div>
+        <p>${escapeHTML(item.excerpt)}</p>
+        <a href="${escapeHTML(item.file_url)}" target="_blank" rel="noopener noreferrer">打开原文核对 ↗</a>
+      </article>
+    `).join("") || '<div class="empty-state">没有找到原文片段。可以尝试更具体的术语；扫描型 PDF 需要先 OCR。</div>';
+  } catch (error) {
+    root.innerHTML = `<div class="error-state">原文检索失败：${escapeHTML(error.message)}</div>`;
+  }
+}
+
 async function searchRetrieval(event) {
   event.preventDefault();
   const query = $("#retrieval-input").value.trim();
@@ -1024,6 +1048,7 @@ function bindEvents() {
   $$('[data-jump]').forEach((button) => button.addEventListener("click", () => showView(button.dataset.jump)));
   $("#header-upload").addEventListener("click", openUpload);
   $("#documents-upload").addEventListener("click", openUpload);
+  $("#source-search-form").addEventListener("submit", searchOriginalSource);
   $("#upload-form").addEventListener("submit", submitUpload);
   $("#quality-mode").addEventListener("change", () => { if ($("#upload-dialog").open) { const offline = $("#quality-mode").value === "basic"; $("#upload-submit").disabled = !offline && !state.modelConfigured; $("#upload-message").textContent = offline ? "基础抽取在本机执行，不调用模型。" : state.modelConfigured ? "深度抽取将调用模型服务。" : "未配置模型密钥，请选择基础抽取。"; } });
   $("#upload-close").addEventListener("click", () => $("#upload-dialog").close());
