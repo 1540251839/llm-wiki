@@ -12,7 +12,6 @@ const state = {
   askHistory: [],
   currentAnswer: null,
   compilationBusy: false,
-  evaluationRuns: [],
   graph: { nodes: [], edges: [], visibleTypes: new Set(), scale: 1, panX: 0, panY: 0, dragging: false, center: "", renderer: "svg", g6: null },
 };
 
@@ -91,7 +90,6 @@ function showView(name) {
   if (name === "compilation") loadCompilation();
   if (name === "wiki") loadWiki();
   if (name === "graph") loadGraph();
-  // Regression evaluation stays available via API/CLI, not the reader UI.
   if (name === "reviews") loadReviews();
   if (name === "settings") loadSettings();
   if (name === "ask") renderAskHistory();
@@ -974,76 +972,6 @@ async function reextractGraph() {
   finally { button.disabled = false; }
 }
 
-const evalMetricLabels = { completion: "回答完成", retrieval_hit: "检索命中", evidence_coverage: "证据覆盖", citation_validity: "引用有效", faithfulness: "答案忠实", honest_refusal: "拒答诚实", robustness: "输入鲁棒" };
-const metricPercent = (value) => typeof value === "number" ? `${Math.round(value * 100)}%` : "不适用";
-
-function renderEvaluation(value) {
-  state.selectedEvaluationId = value.id;
-  $("#replay-evaluation").disabled = !value.id;
-  const metrics = value.metrics || {};
-  $("#evaluation-metrics").innerHTML = renderMetric("SCORE", metrics.score ?? "—", "当前题库综合分") + Object.entries(evalMetricLabels).map(([key, label]) => renderMetric(key.replaceAll("_", " ").toUpperCase(), metricPercent(metrics[key]), label)).join("");
-  $("#evaluation-run-label").textContent = `${value.profile} · ${value.question_count} 题 · ${formatDate(value.finished_at)}`;
-  $("#evaluation-cases").innerHTML = (value.cases || []).map((item, index) => {
-    const applicable = Object.entries(evalMetricLabels).filter(([key]) => typeof item.metrics?.[key] === "number" || typeof item.metrics?.[key] === "boolean");
-    const score = applicable.length ? Math.round(applicable.reduce((sum, [key]) => sum + Number(item.metrics[key]), 0) / applicable.length * 100) : null;
-    return `<details class="evaluation-case"><summary><div><span class="badge ${score === null ? "warning" : score >= 100 ? "ok" : "warning"}">${escapeHTML(item.category || item.mode || "评估")}</span><strong>${escapeHTML(item.question)}</strong></div><span class="case-score">${score ?? "—"}</span></summary><div class="case-content"><div class="case-metrics">${Object.entries(evalMetricLabels).map(([key, label]) => { const metric = item.metrics?.[key]; return `<span class="badge ${metric == null ? "neutral" : Number(metric) === 1 ? "ok" : "warning"}">${label} · ${metric == null ? "不适用" : metricPercent(Number(metric))}</span>`; }).join("")}</div><div class="prose">${renderMarkdown(item.answer || "没有答案")}</div><div class="case-sources">${(item.sources || []).map((source) => `<button class="inline-link" data-wiki-title="${escapeHTML(source.title)}">[${escapeHTML(source.citation_index || "?")}] ${escapeHTML(source.title)}</button>`).join("")}</div>${item.notes || item.reason ? `<p class="muted">${escapeHTML(item.notes || item.reason)}</p>` : ""}<button class="secondary" data-replay-case="${index}">在问答工作台重放 →</button></div></details>`;
-  }).join("") || '<div class="empty-state">该运行没有逐题结果。</div>';
-  bindWikiLinks($("#evaluation-cases"));
-  $$('[data-replay-case]').forEach((button) => button.addEventListener("click", () => {
-    showView("ask"); $("#ask-input").value = value.cases[Number(button.dataset.replayCase)].question; $("#ask-input").focus();
-    toast("问题已填入，可提交以重新检索当前知识库");
-  }));
-}
-
-function renderComparison(baseline, optimized, gate = null) {
-  const root = $("#evaluation-comparison");
-  if (!baseline || !optimized) { root.innerHTML = '<div class="empty-state">运行同一题库的基线与优化版，观察变化与逐题退步。</div>'; return; }
-  const a = baseline.metrics || {}; const b = optimized.metrics || {};
-  const comparable = gate || (a.corpus_fingerprint && a.corpus_fingerprint === b.corpus_fingerprint && a.question_set_hash === b.question_set_hash && a.rules_version === b.rules_version);
-  if (!comparable) { root.innerHTML = '<div class="notice">历史运行的知识库快照或题库不同，不能直接比较。点击“运行对照”生成同一快照下的两组结果。</div>'; $("#evaluation-gate").textContent = "需要同快照对照"; return; }
-  $("#evaluation-gate").textContent = gate ? (gate.passed ? "回归门通过" : `${gate.regressions?.length || 0} 项退步`) : "同快照对照";
-  root.innerHTML = `<div class="table-wrap"><table class="comparison-table"><thead><tr><th>指标</th><th>基线</th><th>优化版</th><th>变化</th></tr></thead><tbody>${Object.entries(evalMetricLabels).map(([key, label]) => { const delta = typeof a[key] === "number" && typeof b[key] === "number" ? (b[key] - a[key]) * 100 : null; return `<tr><td>${label}</td><td>${metricPercent(a[key])}</td><td>${metricPercent(b[key])}</td><td class="${delta < 0 ? "negative" : "positive"}">${delta == null ? "—" : `${delta > 0 ? "+" : ""}${delta.toFixed(1)} pp`}</td></tr>`; }).join("")}</tbody></table></div>${gate?.regressions?.length ? `<div class="notice">${gate.regressions.map((item) => `${escapeHTML(item.question_id)} · ${escapeHTML(evalMetricLabels[item.metric] || item.metric)} ${metricPercent(item.baseline)} → ${metricPercent(item.optimized)}`).join("<br>")}</div>` : ""}<p class="aside-note">固定题库上的规则评估。分数不代表开放问题的通用准确率。</p>`;
-}
-
-async function loadEvaluation() {
-  try {
-    const [runs, questions] = await Promise.all([api("/api/evaluation/runs?limit=20"), api("/api/evaluation/questions")]);
-    state.evaluationRuns = runs.items;
-    $("#evaluation-history").innerHTML = runs.items.map((run) => `<button class="evaluation-run" data-evaluation-run="${run.id}"><div><strong>${escapeHTML(run.profile)} <span>#${run.id}</span></strong><small>${escapeHTML(formatDate(run.finished_at))} · ${run.question_count} 题</small></div><span>${run.metrics?.score ?? "—"}</span></button>`).join("") || '<div class="empty-state">暂无运行记录。</div>';
-    $$('[data-evaluation-run]').forEach((button) => button.addEventListener("click", async () => { try { renderEvaluation(await api(`/api/evaluation/runs/${button.dataset.evaluationRun}`)); } catch (error) { toast(error.message); } }));
-    $("#question-bank-count").textContent = `${questions.total} 题`;
-    $("#question-bank").innerHTML = (questions.items || []).map((item) => `<div class="question-bank-item"><code>${escapeHTML(item.id)}</code><span class="badge neutral">${escapeHTML(item.category || item.type || "知识检索")}</span><div><strong>${escapeHTML(item.question)}</strong><small>${item.expected_mode === "clarification" ? "预期：先请求澄清，不猜测用户意图" : item.expected_no_evidence || item.expected_refusal || item.should_refuse || item.expected_mode === "no_evidence" ? "预期：没有充分证据，明确拒答" : `预期：${escapeHTML((item.expected_source_titles || item.expected_titles || item.expected_terms || []).join("、") || "按证据回答")}`}</small></div></div>`).join("");
-    if (runs.items.length) renderEvaluation(await api(`/api/evaluation/runs/${runs.items[0].id}`));
-    renderComparison(runs.items.find((run) => run.profile === "baseline"), runs.items.find((run) => run.profile === "optimized"));
-  } catch (error) { $("#evaluation-cases").innerHTML = `<div class="error-state">评估读取失败：${escapeHTML(error.message)}</div>`; }
-}
-
-async function runEvaluation(profile) {
-  const buttons = [$("#run-baseline"), $("#run-optimized"), $("#run-comparison")]; buttons.forEach((button) => { button.disabled = true; });
-  $("#evaluation-run-label").textContent = `正在运行 ${profile === "compare" ? "同快照对照" : profile}…`;
-  try {
-    const value = await api(profile === "compare" ? "/api/evaluation/compare" : `/api/evaluation/run?profile=${profile}`, { method: "POST" });
-    await loadEvaluation();
-    if (profile === "compare") { renderEvaluation(value.optimized); renderComparison(value.baseline, value.optimized, value.gate || value.comparison?.gate); toast(value.gate?.passed ? "对照完成，回归门通过" : "对照完成，请检查逐题变化"); }
-    else { renderEvaluation(value); toast(`评估完成：${value.metrics.score}`); }
-  } catch (error) { $("#evaluation-run-label").textContent = "运行失败"; toast(`评估失败：${error.message}`); }
-  finally { buttons.forEach((button) => { button.disabled = false; }); }
-}
-
-async function replayEvaluation() {
-  if (!state.selectedEvaluationId) return;
-  const button = $("#replay-evaluation"); button.disabled = true;
-  const runId = state.selectedEvaluationId;
-  button.textContent = "正在重放…";
-  try {
-    const result = await api(`/api/evaluation/runs/${runId}/replay`, { method: "POST" });
-    await loadEvaluation();
-    renderEvaluation(result);
-    toast(`快照 #${runId} 重放完成：${result.metrics?.score ?? "—"} 分`);
-  } catch (error) { toast(`无法重放：${error.message}`); }
-  finally { button.disabled = false; button.textContent = "重放本次快照"; }
-}
-
 async function loadSettings() {
   try {
     const value = await api("/api/settings");
@@ -1136,7 +1064,6 @@ function bindEvents() {
   $("#graph-canvas").addEventListener("pointermove", (event) => { if (!state.graph.dragging) return; state.graph.panX += event.movementX; state.graph.panY += event.movementY; $("#graph-stage")?.setAttribute("transform", graphTransform()); });
   $("#graph-canvas").addEventListener("pointerup", () => { state.graph.dragging = false; });
   $("#graph-canvas").addEventListener("pointercancel", () => { state.graph.dragging = false; });
-  // The fixed benchmark remains callable from CLI/API but is not in the UI.
   $("#retrieval-form").addEventListener("submit", searchRetrieval);
   $("#test-model").addEventListener("click", testModel);
   $("#deepseek-key-form").addEventListener("submit", saveDeepSeekKey);
