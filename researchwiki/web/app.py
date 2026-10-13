@@ -20,7 +20,6 @@ from .. import __version__
 from ..app import delete_source, do_ask_with_metadata, do_answer_events, do_search, ingest, initialize, rebuild
 from ..compilation import CompilationService, compilation_status
 from ..config import Config, load_config
-from ..evaluation import load_questions, run_evaluation
 from ..graph import extract_graph
 from ..graph.research import project_research_graph
 from ..index.database import Database
@@ -312,7 +311,6 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
                 {"key": "wiki", "label": "Wiki 知识页", "detail": "引用 · 内链 · 人工笔记"},
                 {"key": "graph", "label": "图谱与检索", "detail": "稳定节点边 · 证据对象"},
                 {"key": "ask", "label": "可溯源问答", "detail": "流式回答 · 原文定位"},
-                {"key": "evaluation", "label": "固定题库评估", "detail": "冻结快照 · 对照回放"},
             ],
         }
 
@@ -856,61 +854,6 @@ def create_app(root: Union[str, Path] = ".") -> FastAPI:
             except Exception as exc:
                 yield event("error", {"message": str(exc)})
         return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    @app.get("/api/evaluation/questions")
-    def evaluation_questions() -> Dict[str, Any]:
-        items = load_questions(config)
-        return {"items": items, "total": len(items)}
-
-    @app.get("/api/evaluation/runs")
-    def evaluation_runs(limit: int = Query(default=20, ge=1, le=100)) -> Dict[str, Any]:
-        db = Database(config.db_path)
-        try:
-            items = db.list_evaluation_runs(limit=limit)
-        finally:
-            db.close()
-        return {"items": items, "total": len(items)}
-
-    @app.get("/api/evaluation/runs/{run_id}")
-    def evaluation_run(run_id: int) -> Dict[str, Any]:
-        db = Database(config.db_path)
-        try:
-            value = db.get_evaluation_run(run_id)
-        finally:
-            db.close()
-        if not value:
-            raise HTTPException(status_code=404, detail="Evaluation run not found")
-        for case in value.get("cases") or []:
-            case["answer"] = str(case.get("answer") or "").replace(str(config.root.resolve()) + "/", "")
-            for source in case.get("sources") or []:
-                source["path"] = _relative_name(config.root, str(source.get("path") or ""))
-                for evidence in source.get("provenance") or []:
-                    evidence["raw_path"] = _relative_name(config.root, str(evidence.get("raw_path") or ""))
-        return value
-
-    @app.post("/api/evaluation/run")
-    def start_evaluation(profile: str = Query(default="optimized", pattern="^(baseline|optimized)$")) -> Dict[str, Any]:
-        value = run_evaluation(config, profile=profile)
-        return evaluation_run(int(value["id"]))
-
-    @app.post("/api/evaluation/compare")
-    def compare_evaluation() -> Dict[str, Any]:
-        from ..evaluation.runner import compare_profiles
-        value = compare_profiles(config)
-        for profile in ("baseline", "optimized"):
-            value[profile] = evaluation_run(int(value[profile]["id"]))
-        value.setdefault("comparison", value.get("compare") or value.get("gate") or {})
-        value.setdefault("gate", value["comparison"])
-        return value
-
-    @app.post("/api/evaluation/runs/{run_id}/replay")
-    def replay_run(run_id: int) -> Dict[str, Any]:
-        from ..evaluation.runner import replay_evaluation
-        try:
-            value = replay_evaluation(config, run_id)
-        except (ValueError, OSError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return evaluation_run(int(value["id"]))
 
     @app.get("/api/settings")
     def settings() -> Dict[str, Any]:
