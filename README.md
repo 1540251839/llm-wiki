@@ -1,6 +1,6 @@
 # ResearchWiki 0.2
 
-ResearchWiki 是一个本地优先、可追溯的论文知识工作台。它接收 PDF、DOCX、Markdown 和纯文本资料，保存原文和结构化抽取，再编译成跨论文的 Paper、Method、Dataset、Topic 页面，供图谱、检索、问答和评估使用。
+ResearchWiki 是一个本地优先、可追溯的论文知识工作台。它接收 PDF、DOCX、Markdown 和纯文本资料，保存原文和结构化抽取，再编译成跨论文的 Paper、Method、Dataset、Topic 页面，供图谱、检索和研究问答使用。
 
 当前默认使用本地规则抽取论文基础信息，**不需要配置 DeepSeek 密钥**。只有用户主动选择深度抽取、跨论文综合或基于模型的问答时，才向已配置的模型 API 发送相应论文内容或检索片段。原文、Wiki 和索引均保存在本机。
 
@@ -26,7 +26,7 @@ ResearchWiki 是一个本地优先、可追溯的论文知识工作台。它接�
 
 ## 新版使用流程：少入口、可读知识与按需增强
 
-主导航已收敛为 **资料库 / 知识 Wiki / 知识图谱 / 研究问答 / 设置**。固定题库与评估已从普通阅读界面移除，仍保留 `rw eval`、开发回归测试及 API；知识编译、审核项和检索检查分别放在高级管理入口，便于排查但不打断阅读。
+主导航已收敛为 **资料库 / 知识 Wiki / 知识图谱 / 研究问答 / 设置**。已移除固定题库与专用评估模块；论文导入、索引、问答等功能仍通过常规自动测试检查；知识编译、审核项和检索检查分别放在高级管理入口，便于排查但不打断阅读。
 
 1. 进入「设置」，在密码框中保存 **DeepSeek API Key**；本地配置立即生效，无需手动编辑 `.env`。保存到 `data/private/deepseek_api_key`（POSIX 权限 0600，Git 忽略），响应和日志不返回完整密钥。此路径是本机受限文件，并非硬件加密或云端密钥管家；删除本地文件不会撤销 DeepSeek 平台的密钥。密码写入接口限制本地/同源请求，工作台仍不支持公网暴露。
 2. 在「资料库」导入文件，默认基础离线提取；深度模式才调用模型。
@@ -87,28 +87,20 @@ rw web --host 127.0.0.1 --port 8765 --reload
 - Wiki 页面：浏览 Paper、Method、Dataset 和 Topic，保留受保护的个人笔记，查看原始来源、页码或逻辑段落、字符区间与证据摘录。
 - 知识图谱：从 Wiki、来源和页面类型确定性生成稳定节点/边合同，支持搜索、类型显隐、缩放、详情和重新抽取。
 - 证据问答：融合 FTS5、可选向量和 Wiki 关系，实时接收模型 SSE 文本增量，通过编号引用打开 Wiki、原文与证据定位。
-- 质量评估：运行 18 道固定题，查看七项指标、冻结语料快照、历史重放和 baseline/optimized 逐题回归对比。
 - Review 队列：集中处理标题异常、抽取稀疏和缺少局限性等问题。
 - 系统设置：本地安全保存、删除和测试 DeepSeek Key，并展示当前阅读语言与检索信息。
 - 可恢复删除：资料及仅由它生成的页面会移到 `data/trash/`，共享实体和人工笔记保留。
 
 浏览器只调用本地 `/api/*`；DeepSeek 密钥保留在 Python 服务端，不会下发到前端。没有密钥时，已有 Wiki 的浏览与检索仍可用，问答会返回 `local_evidence`；完全没有检索证据时返回 `no_evidence`，不会调用模型。
 
-知识编译、索引、图谱和评估可分别从命令行执行：
+知识编译、索引和图谱可分别从命令行执行：
 
 ```bash
 rw compile --dry-run     # 查看输入、受影响页面、保留文件和诊断，不写 Wiki
 rw compile               # 从抽取缓存编译知识页；成功后重建索引与图谱
 rw build                 # 只从已有 Wiki 重建索引、来源定位和图谱
 rw graph                 # 只重新投影图谱节点/边
-rw eval --profile baseline
-rw eval --profile optimized
-rw eval --compare        # 同一冻结语料/题库下对比两套策略
 ```
-
-固定题库位于 `evaluation/questions.json`，针对当前示例论文覆盖事实、跨来源、方法、拒答、澄清、对抗和输入鲁棒性；换用其他论文时应维护对应的标准答案和预期来源。七项指标为回答完成、检索命中、证据覆盖、引用有效、摘录忠实、拒答诚实和输入鲁棒性，不适用项以空值排除。分数是固定规则的工程回放结果，不能当作模型通用准确率；其中“忠实”只检查本地摘录与所引 Wiki 内容一致，不验证原论文事实是否正确。
-
-评估冻结题库、Wiki 内容、来源定位、上下文配置、规则版本和逻辑时间，快照写入 `data/evaluation/snapshots/`。`POST /api/evaluation/compare` 在同一快照上比较两套策略，并报告逐题逐指标退步；`POST /api/evaluation/runs/{id}/replay` 使用该历史运行的快照重放，快照被改动或规则版本不兼容时拒绝重放。评估不调用模型；系统设置页的“连接测试”会真实调用当前模型。
 
 ## 数据流
 
@@ -123,7 +115,6 @@ Wiki 页面、引用、内链：Markdown + manifest.json + index.md + log.md
     ↓
 可溯源问答：上下文预算 + SSE delta + [n] 引用 + 原文定位
     ↓
-固定题库与评估：冻结快照 + 七项指标 + 基线对比 + 历史重放
 ```
 
 资料状态依次为 `UPLOADED → EXTRACTING → EXTRACTED → WIKI_CREATED → INDEXED`。队列另外记录 `PENDING/RUNNING/SUCCEEDED/FAILED/CANCELLED` 和当前 stage。任一步失败都会保留原文、错误和尝试次数；Web 服务重启时，未领取的任务继续执行，已中断任务转为可重试失败。
@@ -153,8 +144,6 @@ rw ask QUESTION --top-k N            基于检索证据回答
 rw build                             从现有 Wiki 重建元数据、FTS5 和关系
 rw compile [--dry-run]                从缓存重编译知识层，或只预览输入与差异
 rw graph                             重新生成图谱合同
-rw eval --profile baseline|optimized  运行固定题库的确定性本地评估
-rw eval --compare                    同一冻结语料上比较基线和优化策略
 rw jobs [--status STATUS]            查看持久化导入任务
 rw reviews [--status STATUS]         查看质量审核项
 rw delete SOURCE_ID --yes            可恢复地删除资料及其独占生成内容
@@ -191,10 +180,6 @@ rw --root /path/to/workspace web
 | GET | `/api/search?q=...&top_k=8` | 全文检索 |
 | POST | `/api/ask` | 证据问答 |
 | POST | `/api/ask/stream` | SSE 状态、来源、文本增量和最终回答 |
-| GET | `/api/evaluation/questions`、`/api/evaluation/runs`、`/api/evaluation/runs/{id}` | 固定题库、历史运行与逐题结果 |
-| POST | `/api/evaluation/run?profile=baseline` | 在当前语料快照运行指定策略 |
-| POST | `/api/evaluation/compare` | 冻结同一语料后比较两套策略和回归门 |
-| POST | `/api/evaluation/runs/{id}/replay` | 重放历史运行保存的输入快照 |
 | GET/POST | `/api/settings`、`/api/settings/test` | 查看脱敏配置、真实模型连接测试 |
 
 问答请求示例：
@@ -235,7 +220,6 @@ retrieval:
 - `wiki/manifest.json`：来源哈希、稳定页面 ID、内容摘要、引用、内链和精确证据定位。
 - `wiki/index.md`、`wiki/log.md`：人类导航与追加式维护记录，不进入检索索引。
 - `data/compilation/runs/`：编译输入、差异、诊断与成功/失败报告。
-- `data/evaluation/snapshots/`：可供历史评估重放的冻结语料与题库。
 - `data/researchwiki.db`：资料状态、页面元数据、关系与 FTS5 索引。
 - `logs/researchwiki.log`：JSON Lines 格式的导入成功与失败事件。
 - 运行 `rw web` 的终端：HTTP 请求、启动错误和后台任务警告。
@@ -243,6 +227,8 @@ retrieval:
 失败资料的 `error_message` 也会持久化到数据库，并显示在资料详情中。
 
 用户笔记由 `<!-- user-notes:start -->` 和 `<!-- user-notes:end -->` 保护；自动更新只替换标记上方的生成内容。`schema/*.md` 当前是工作区说明文件，并非可直接修改的运行时模板。
+
+旧版数据库中的 `evaluation_runs`、`evaluation_cases` 表不会被自动删除；它们不再创建、不再读取，也不会在网页、CLI 或 API 中暴露。如果不需要这些历史记录，可自行备份后清理旧数据库。
 
 ## 当前边界
 
