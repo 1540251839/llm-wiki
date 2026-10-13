@@ -353,7 +353,7 @@ class Database:
                 expression = " OR ".join(_fts_quote(t) for t in terms[:24])
                 try:
                     rows = self.conn.execute(
-                        prefix + "JOIN source_chunks_fts f ON f.rowid=c.id "
+                        prefix + "JOIN source_chunks_fts ON source_chunks_fts.rowid=c.id "
                         "WHERE source_chunks_fts MATCH ? AND " + where +
                         " ORDER BY bm25(source_chunks_fts),c.source_id,c.page_number,c.chunk_index LIMIT ?",
                         [expression, *params, limit],
