@@ -8,10 +8,10 @@ build/
 
 # Private runtime libraries, generated knowledge, model checkpoints and logs.
 # Includes data/private/, data/syntheses/ and all future runtime subdirectories.
-data/
-raw/
-wiki/
-logs/
+/data/
+/raw/
+/wiki/
+/logs/
 
 # Local credentials; publish only the empty configuration example.
 .env
