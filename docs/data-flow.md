@@ -1,6 +1,6 @@
 # ResearchWiki 数据流与接口边界
 
-产品中的六个主环节为：资料中心 → 知识编译 → Wiki 页面、引用与内链 → 图谱节点/边与检索对象 → 可溯源问答 → 固定题库与评估。每个环节消费上一环节的真实产物；总览和设置分别提供状态入口与运行条件。
+产品中的五个主环节为：资料中心 → 知识编译 → Wiki 页面、引用与内链 → 图谱节点/边与检索对象 → 可溯源问答。每个环节消费上一环节的真实产物；总览和设置分别提供状态入口与运行条件。
 
 ## 1. 写入主链
 
@@ -53,35 +53,26 @@ POST /api/ask 或 /api/ask/stream
 
 证据卡携带 `file_url` 与 `evidence_url`。`GET /api/documents/{id}/evidence?page=N&start=A&end=B` 再次校验原件哈希和字符边界，返回原文片段及 `source_hash_verified=true`。PDF 的 `pagination=physical`，DOCX/MD/TXT 的 `pagination=logical`；DOCX 使用单个逻辑文本流，页号不代表 Word 的物理排版页。索引重建优先采用清单中经原文切片验证的精确证据，确保 Wiki、问答和图谱使用同一定位；回退摘录保留 `confidence` 标记。
 
-## 3. 图谱与评估读取链
+## 3. 图谱读取链
 
 ```text
 POST /api/graph/extract
   → 从 SQLite Wiki、page_sources 和 links 重新投影
-  → PAGE / TOPIC / PAGE_TYPE / SOURCE 节点
+  → PAGE / TOPIC / PAGE_TYPE / SOURCE 节点（来源审计/调试合同）
   → HAS_SOURCE / HAS_TYPE / LINKS_TO 边
-  → 检查无缺失端点、无自环、稳定节点 ID
+  → 检查缺失端点、自环及稳定节点 ID
   → graph_nodes / graph_edges 原子替换 + graph_runs digest
 
-POST /api/evaluation/run?profile=baseline|optimized
-  → 冻结 evaluation/questions.json、Wiki 内容和证据定位
-  → baseline / optimized 两套确定性本地排序与证据回答
-  → 七项指标和逐题结果
-  → evaluation_runs / evaluation_cases + data/evaluation/snapshots/<hash>.json
-
-POST /api/evaluation/compare
-  → 同一题库与语料快照运行两套策略
-  → 逐题逐指标比较，任何退步都会进入 regressions
-
-POST /api/evaluation/runs/{id}/replay
-  → 校验历史快照哈希与规则版本
-  → 恢复原语料、题库、上下文配置和逻辑时间
-  → 生成新的评估记录，不依赖当前 Wiki 内容
+GET /api/graph/research
+  → 读取论文、主题、方法和数据集四类科研实体
+  → 默认返回以论文为中心的一跳关系，必要时切换全局图
+  → 数据集仅提及与实验用途明确区分；无法确认时保留“提及”
+  → 本地 SVG 图可用，可主动启用 G6 力导向布局
 ```
 
-图谱页面节点 ID 来自 Wiki 相对路径哈希，`page_id` 仅用于当前数据库中的页面跳转。规范化摘要排除数据库行号和绝对工作区路径，移动目录或重建 SQLite 不改变同一合同的 digest；页面改名/移动会改变其路径身份。`HAS_SOURCE` 边携带来源 ID、页码、字符区间、`locator`、`confidence` 和摘录。三类边表达可验证的文档结构关系，不表示论文之间的因果、支持或反驳关系。
+科研图谱不把引用关系伪装为已证实的因果关系；实验用途的原文匹配只能说明找到了相关文字，并非语义上的人工审核。
 
-当前默认题库为 18 道针对示例论文的问题；七项评分是 `completion`、`retrieval_hit`、`evidence_coverage`、`citation_validity`、`faithfulness`、`honest_refusal`、`robustness`。另记录 `source_locator_coverage` 作为辅助指标，不重复计入总分；不适用项以空值排除，保存实际参与评分的题数。`faithfulness` 衡量本地抽取片段是否出现在所引 Wiki 中，不证明模型答案或原论文结论正确。对比和重放均不调用远程模型；快照哈希或规则版本不一致时拒绝重放。题库、语料或评分规则不同的运行分数不能直接比较。
+图谱页面节点 ID 来自可复现的 Wiki 路径标识，数据库行号只用于界面跳转。原来源审计图的 `HAS_SOURCE` 边携带来源 ID、页码、字符区间、`locator`、`confidence` 和摘录。其类型边和内链边表达文档结构，不代表论文结论之间的因果关系。
 
 ## 4. 信任边界
 
@@ -134,4 +125,4 @@ source .venv/bin/activate
 rw web --host 127.0.0.1 --port 8765
 ```
 
-打开 <http://127.0.0.1:8765>；重启时在原终端按 `Ctrl+C` 后重新运行。开发回归可执行 `python -m pytest -q`，知识层和评估分别用 `rw compile --dry-run`、`rw compile`、`rw eval --compare` 检查。真实模型连接测试单独通过设置页发起，不计入离线评估。
+打开 <http://127.0.0.1:8765>；重启时在原终端按 `Ctrl+C` 后重新运行。开发回归可执行 `python -m pytest -q`，知识层可使用 `rw compile --dry-run`、`rw compile` 检查。真实模型连接测试单独通过设置页发起。
