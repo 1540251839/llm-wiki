@@ -665,3 +665,17 @@ dialog::backdrop { background: #14232c77; backdrop-filter: blur(3px); }
 .graph-connection:hover { background: var(--accent-soft); }
 .graph-legend { color: var(--muted); }
 @media(max-width:700px){ .graph-g6 { height:420px; } }
+
+/* Source-first reading: on-demand original PDF/text search without an LLM. */
+.source-search-panel { margin-top: 16px; }
+.source-search-panel .muted { font-size: 12px; line-height: 1.7; margin: 10px 0 14px; }
+.source-search-form { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.source-search-form .search-field { flex: 1 1 300px; }
+.source-search-results { display: grid; gap: 11px; margin-top: 15px; }
+.original-result { padding: 15px 17px; border: 1px solid var(--line); border-radius: 10px; }
+.original-result-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 7px; }
+.original-result-head strong { font-size: 13px; overflow-wrap: anywhere; }
+.original-result-head small { color: var(--muted); }
+.original-result p { margin: 10px 0; line-height: 1.75; font-size: 12px; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.original-result a { color: var(--blue); font-size: 12px; text-decoration: none; }
+.original-result a:hover { text-decoration: underline; }
